@@ -21,7 +21,7 @@ exports.handler = async (event) => {
         "X-Title": "uqoodi"
       },
       body: JSON.stringify({
-        model: "mistralai/mistral-7b-instruct:free",
+        model: "meta-llama/llama-3.2-3b-instruct:free",
         messages: [{ role: "user", content: message }]
       })
     });
