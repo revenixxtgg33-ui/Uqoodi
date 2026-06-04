@@ -9,17 +9,16 @@ exports.handler = async (event) => {
   }
   try {
     const { message } = JSON.parse(event.body);
-    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyAQ_Ab8RN6IbEjQKWJTT6_XLqb_etvIv9MxOsihd6VzoXYD096OVYQ", {
+    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=AQ.Ab8RN6Ip32TAHT2gUMJ9IpMee1yOoBH6UFMvP-6QKyJEDBV2Lw", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{
-          parts: [{ text: "أنت مساعد متخصص في إنشاء العقود الاحترافية باللغة العربية. " + message }]
-        }]
+        system_instruction: { parts: [{ text: "أنت مساعد متخصص في إنشاء العقود الاحترافية باللغة العربية. أنشئ عقوداً منظمة وكاملة." }] },
+        contents: [{ parts: [{ text: message }] }]
       })
     });
     const data = await response.json();
-    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "لم أتمكن من الرد";
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || JSON.stringify(data);
     return { statusCode: 200, headers, body: JSON.stringify({ reply }) };
   } catch (err) {
     return { statusCode: 200, headers, body: JSON.stringify({ reply: "خطأ: " + err.message }) };
