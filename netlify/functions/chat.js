@@ -9,24 +9,17 @@ exports.handler = async (event) => {
   }
   try {
     const { message } = JSON.parse(event.body);
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyAQ_Ab8RN6IbEjQKWJTT6_XLqb_etvIv9MxOsihd6VzoXYD096OVYQ", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer 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",
-        "HTTP-Referer": "https://netlify.app",
-        "X-Title": "uqoodi"
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "deepseek/deepseek-r1:free",
-        messages: [
-          { role: "system", content: "You are a legal assistant specialized in creating professional Arabic contracts. Always respond in Arabic." },
-          { role: "user", content: message }
-        ]
+        contents: [{
+          parts: [{ text: "أنت مساعد متخصص في إنشاء العقود الاحترافية باللغة العربية. " + message }]
+        }]
       })
     });
     const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "لم أتمكن من الرد";
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "لم أتمكن من الرد";
     return { statusCode: 200, headers, body: JSON.stringify({ reply }) };
   } catch (err) {
     return { statusCode: 200, headers, body: JSON.stringify({ reply: "خطأ: " + err.message }) };
