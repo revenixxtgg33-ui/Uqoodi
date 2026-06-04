@@ -9,7 +9,7 @@ exports.handler = async (event) => {
   }
   try {
     const { message } = JSON.parse(event.body);
-    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=AQ.Ab8RN6Ip32TAHT2gUMJ9IpMee1yOoBH6UFMvP-6QKyJEDBV2Lw", {
+    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-lite:generateContent?key=AQ.Ab8RN6Ip32TAHT2gUMJ9IpMee1yOoBH6UFMvP-6QKyJEDBV2Lw", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
