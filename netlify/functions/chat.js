@@ -4,39 +4,28 @@ exports.handler = async (event) => {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type"
   };
-
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers, body: "" };
   }
-
   try {
     const { message } = JSON.parse(event.body);
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: message }] }],
-          systemInstruction: {
-            parts: [{ text: "You are a legal assistant. Create professional contracts in Arabic." }]
-          }
-        })
-      }
-    );
-
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer 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"
+      },
+      body: JSON.stringify({
+        model: "llama3-8b-8192",
+        messages: [
+          { role: "system", content: "أنت مساعد متخصص في إنشاء العقود الاحترافية باللغة العربية. أنشئ عقوداً منظمة وكاملة وبلغة قانونية واضحة." },
+          { role: "user", content: message }
+        ]
+      })
+    });
     const data = await response.json();
-    console.log("Gemini response:", JSON.stringify(data));
-
-    if (!response.ok) {
-      return { statusCode: 200, headers, body: JSON.stringify({ reply: "خطأ: " + data.error?.message }) };
-    }
-
-    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "لم أتمكن من الرد";
+    const reply = data.choices?.[0]?.message?.content || "لم أتمكن من الرد";
     return { statusCode: 200, headers, body: JSON.stringify({ reply }) };
-
   } catch (err) {
     return { statusCode: 200, headers, body: JSON.stringify({ reply: "خطأ: " + err.message }) };
   }
