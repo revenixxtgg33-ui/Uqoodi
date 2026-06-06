@@ -14,9 +14,9 @@ export default async function handler(req, res) {
         "Authorization": "Bearer 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"
       },
       body: JSON.stringify({
-        model: "llama3-8b-8192",
+        model: "llama-3.3-70b-versatile",
         messages: [
-          { role: "system", content: "أنت مساعد متخصص في إنشاء العقود الاحترافية باللغة العربية." },
+          { role: "system", content: "أنت مساعد متخصص في إنشاء العقود الاحترافية باللغة العربية. أنشئ عقوداً منظمة وكاملة وبلغة قانونية واضحة." },
           { role: "user", content: message }
         ]
       })
