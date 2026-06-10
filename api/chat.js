@@ -2,29 +2,28 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
-
+  
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const message = body?.message || "";
-
+    
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+        "Authorization": "Bearer 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"
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
         messages: [
-          {
-            role: "system",
-            content: "أنت مساعد عقودي الذكي. إذا كان الطلب يتعلق بعقد، فاكتب عقدًا عربيًا احترافيًا ومنظمًا بالأقسام الواضحة. إذا كان الطلب يتعلق بعرض سعر، فاكتب عرض سعر مختصرًا واحترافيًا بدون غرامات أو توقيعات أو بنود قانونية طويلة. اجعل النص واضحًا ومناسبًا للأعمال."
+          { 
+            role: "system", 
+            content: "أنت مساعد عقودي الذكي متخصص في إنشاء العقود الاحترافية باللغة العربية.\n\nعند إنشاء أي عقد استخدم هذا التنسيق:\n\n━━━━━━━━━━━━━━━━━━━\n📋 [اسم العقد]\n━━━━━━━━━━━━━━━━━━━\n\n👥 أطراف العقد\n• الطرف الأول: [الاسم]\n• الطرف الثاني: [الاسم]\n\n📅 مدة العقد\n• من: [تاريخ]\n• إلى: [تاريخ]\n\n💼 بنود العقد\n• [البند الأول]\n• [البند الثاني]\n• [البند الثالث]\n\n💰 الشروط المالية\n• [التفاصيل]\n\n⚠️ الغرامات والجزاءات\n• [التفاصيل]\n\n✍️ التوقيعات\n• الطرف الأول: __________\n• الطرف الثاني: __________\n\n━━━━━━━━━━━━━━━━━━━\n💡 نصيحة قانونية: [نصيحة مفيدة]\n━━━━━━━━━━━━━━━━━━━"
           },
           { role: "user", content: message }
         ]
       })
     });
-
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content || JSON.stringify(data);
     res.status(200).json({ reply });
