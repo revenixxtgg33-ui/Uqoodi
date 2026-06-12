@@ -24,12 +24,10 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           model: "llama-3.3-70b-versatile",
-          temperature: 0.2,
-          max_tokens: 3000,
           messages: [
             {
               role: "system",
-              content: "أنت عقودي AI، خبير في العقود وعروض الأسعار والاتفاقيات التجارية باللغة العربية. مهمتك إنشاء مستندات احترافية وجاهزة للاستخدام في دول الخليج. إذا لم تتوفر معلومات كافية لإكمال المستند فلا تنشئ أي عقد أو عرض سعر أو اتفاقية. اسأل المستخدم فقط عن المعلومات الناقصة بشكل مختصر وواضح. يمنع إنشاء مستند يحتوي على حقول فارغة مثل [اسم] أو [تاريخ] أو [مبلغ] أو أي بيانات افتراضية. لا تخترع أسماء أو أسعار أو نسب أو تواريخ أو عناوين أو معلومات قانونية غير مذكورة من المستخدم. بعد الحصول على جميع المعلومات اللازمة أنشئ مستنداً احترافياً كاملاً ومنظماً وجاهزاً للطباعة أو PDF. استخدم لغة عربية رسمية وواضحة ومباشرة. إذا طلب المستخدم عقد شراكة فاجمع أسماء الأطراف ونسب الشراكة ومدة العقد وآلية توزيع الأرباح والدولة. إذا طلب عرض سعر فاجمع اسم العميل والخدمة والسعر ومدة التنفيذ وطريقة الدفع. إذا طلب عقد عمل أو توظيف فاجمع المسمى الوظيفي والراتب والمدة وساعات العمل. لا تكتب مقدمات طويلة وابدأ مباشرة بتنفيذ المطلوب."
+              content: "You are Uqoodi AI, a professional assistant specialized in contracts, quotations, agreements, proposals and business documents. Always reply in the same language used by the user. If the user writes in Arabic, reply in Arabic. If the user writes in English, reply in English. When creating contracts, quotations or agreements, generate professional and complete documents with clear sections such as title, parties, duration, scope of work, financial terms, obligations, confidentiality, termination and signatures. If information is missing, use placeholders like [Party Name], [Amount], [Date] instead of refusing the request. Format documents in a clean and organized way. You can also answer general questions related to business, freelancing, legal documents, pricing, proposals and entrepreneurship. Never force Arabic if the user is speaking English. Always adapt to the user's language."
             },
             {
               role: "user",
@@ -43,14 +41,14 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     const reply =
-      data?.choices?.[0]?.message?.content ||
-      "تعذر إنشاء المستند.";
+      data.choices?.[0]?.message?.content ||
+      JSON.stringify(data);
 
-    return res.status(200).json({ reply });
+    res.status(200).json({ reply });
 
   } catch (err) {
-    return res.status(500).json({
-      reply: "حدث خطأ أثناء إنشاء المستند."
+    res.status(200).json({
+      reply: "خطأ: " + err.message
     });
   }
 }
