@@ -1,11 +1,16 @@
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
 
   try {
     const body =
-      typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+      typeof req.body === "string"
+        ? JSON.parse(req.body)
+        : req.body;
 
     const message = body?.message || "";
 
@@ -15,68 +20,55 @@ export default async function handler(req, res) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: "Bearer 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",
+          "Authorization": "Bearer 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"
         },
         body: JSON.stringify({
           model: "llama-3.3-70b-versatile",
+          max_tokens: 3000,
+          temperature: 0.2,
           messages: [
             {
               role: "system",
-              content: `أنت مساعد Uqoodi الذكي متخصص في إنشاء المستندات القانونية والتجارية.
+              content: `أنت مساعد عقودي الذكي وخبير متخصص في العقود والمستندات التجارية باللغة العربية.
 
-المهام:
-- فهم طلب المستخدم
-- تحديد نوع المستند تلقائياً:
-  • عقد / اتفاقية → عقد قانوني
-  • عرض سعر / تسعير → عرض سعر
-  • مقترح → Business Proposal
-- إذا لم يكن واضحًا اطلب توضيح
+مهمتك إنشاء عقود ومستندات احترافية كاملة ومخصصة حسب طلب المستخدم. استخدم لغة قانونية واضحة ورسمية ومناسبة للأعمال في دول الخليج.
 
-القواعد:
-- التزم بلغة المستخدم
-- اجعل الرد جاهز للاستخدام مباشرة
-- لا تشرح ولا تطيل
+اكتب المستند كاملاً وجاهزاً للاستخدام مع تنظيم احترافي وعناوين واضحة. لا تكتب قوالب مختصرة ولا تكتف بعناوين أو نقاط عامة.
 
-تنسيق العقد:
-━━━━━━━━━━━━━━━━━━━
-📋 [اسم العقد]
-━━━━━━━━━━━━━━━━━━━
+يجب أن يتضمن العقد تلقائياً جميع البنود اللازمة حسب نوعه بما في ذلك تعريف الأطراف، نطاق العمل، الالتزامات، مدة العقد، المقابل المالي، آلية الدفع، السرية، الملكية الفكرية، الضمانات، المسؤولية، التعديلات، الإنهاء، القوة القاهرة، تسوية النزاعات والتوقيعات عند الحاجة.
 
-👥 الأطراف
-• الطرف الأول: [اسم]
-• الطرف الثاني: [اسم]
+عند نقص المعلومات لا توقف إنشاء المستند، بل استخدم أفضل صياغة مهنية ممكنة وأشر فقط إلى البيانات التي يجب استكمالها.
 
-📅 المدة
-• من: [تاريخ]
-• إلى: [تاريخ]
+اجعل كل بند مفصلاً وعملياً ويقدم قيمة حقيقية للمستخدم.
 
-💼 البنود
-• [بند 1]
-• [بند 2]
+إذا طلب المستخدم عقداً فاكتب عقداً كاملاً.
 
-💰 المالية
-• [تفاصيل]
+إذا طلب عرض سعر فاكتب عرض سعر احترافياً.
 
-⚠️ الجزاءات
-• [تفاصيل]
+إذا طلب اتفاقية أو مستنداً تجارياً فاكتبه بصيغة جاهزة للاستخدام والطباعة والتصدير إلى PDF.
 
-✍️ التوقيعات
-• الطرف الأول: ________
-• الطرف الثاني: ________`,
+استخدم تنسيقاً منظماً واحترافياً مع عناوين واضحة وأقسام مرتبة.`
             },
-            { role: "user", content: message },
-          ],
-        }),
+            {
+              role: "user",
+              content: message
+            }
+          ]
+        })
       }
     );
 
     const data = await response.json();
 
     const reply =
-      data?.choices?.[0]?.message?.content || "No response from AI";
+      data.choices?.[0]?.message?.content ||
+      JSON.stringify(data);
 
     res.status(200).json({ reply });
+
   } catch (err) {
-    res.status(500).json({ reply: err.message });
+    res.status(200).json({
+      reply: "خطأ: " + err.message
+    });
   }
 }
