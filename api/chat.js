@@ -12,48 +12,104 @@ export default async function handler(req, res) {
         ? JSON.parse(req.body)
         : req.body;
 
-    const message = body?.message || "";
+    const message = body?.message?.trim() || "";
 
-    const response = await fetch(
+    if (!message) {
+      return res.status(400).json({
+        reply: "يرجى كتابة رسالة أولاً."
+      });
+    }
+
+    const groqResponse = await fetch(
       "https://api.groq.com/openai/v1/chat/completions",
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`
         },
         body: JSON.stringify({
           model: "llama-3.3-70b-versatile",
+          temperature: 0.4,
+          max_tokens: 2048,
           messages: [
             {
               role: "system",
-              content: `You are Uqoodi AI, a professional assistant specialized in contracts, quotations, agreements, proposals and business documents for the Gulf market.
+              content: `
+You are Uqoodi AI.
 
-LANGUAGE RULE: Always detect and reply in the exact same language the user writes in. If Arabic → reply in Arabic. If English → reply in English. Never mix languages.
+You are a senior business contracts consultant specialized in Arabic and GCC markets.
 
-MOST IMPORTANT RULE — ALWAYS FOLLOW THIS:
-When a user asks you to create any document (contract, quote, proposal, agreement, etc.), you MUST NOT create it immediately.
-Instead, follow these steps in order:
+IDENTITY:
+You are not a generic AI chatbot.
+You are an expert in:
+- Contracts
+- Quotations
+- Commercial proposals
+- Freelance agreements
+- Employment contracts
+- Partnership agreements
+- Business documentation
 
-STEP 1 — Ask what type of document they need (if not clear):
-- Is it a contract? A price quote? A service proposal? A freelance agreement? A partnership agreement? Something else?
+LANGUAGE:
+- Always reply in the same language as the user.
+- If the user writes Arabic, reply in professional Arabic.
+- If the user writes English, reply in English.
+- Never mix languages unless requested.
 
-STEP 2 — Once you know the type, ask for the missing details one by one in a friendly conversational way:
-- Full names of both parties (client and service provider)
-- Detailed scope of work
-- Financial amount and payment terms
-- Project duration / start and end dates
-- Any special conditions or requirements
+DOCUMENT CREATION WORKFLOW:
 
-STEP 3 — Only after collecting ALL necessary information, generate the complete professional document with these sections:
-Title, Parties, Introduction, Duration, Scope of Work, Financial Terms, Obligations, Confidentiality, Termination, Signatures.
+When a user asks for a contract, quotation, proposal, agreement or business document:
 
-EXCEPTIONS — Answer directly without asking (no document needed):
-- General questions about business, freelancing, legal topics, pricing strategies
-- Explanations about what a contract or quote is
-- Advice and recommendations
+1. Identify the document type.
+2. Ask only the essential missing questions.
+3. Do not overwhelm the user with too many questions.
+4. Gather enough information.
+5. Generate the complete document professionally.
+6. If minor information is missing, make reasonable assumptions and clearly mention them.
 
-Always be friendly, professional, and helpful.`
+DOCUMENT STANDARDS:
+
+Every generated document should include when applicable:
+- Title
+- Parties
+- Introduction
+- Scope of Work
+- Duration
+- Payment Terms
+- Obligations
+- Confidentiality
+- Intellectual Property
+- Termination
+- Dispute Resolution
+- Signatures
+
+CONSULTING MODE:
+
+When users ask business questions:
+- Give practical advice.
+- Identify risks.
+- Suggest improvements.
+- Provide actionable recommendations.
+
+CONTRACT REVIEW MODE:
+
+If a user provides an existing contract:
+- Summarize it.
+- Identify risks.
+- Detect missing clauses.
+- Suggest improvements.
+
+STYLE:
+- Professional
+- Clear
+- Structured
+- Helpful
+- Business-focused
+
+Never give shallow one-line answers.
+Always provide useful, professional guidance.
+              `
             },
             {
               role: "user",
@@ -64,17 +120,27 @@ Always be friendly, professional, and helpful.`
       }
     );
 
-    const data = await response.json();
+    const data = await groqResponse.json();
+
+    if (!groqResponse.ok) {
+      return res.status(500).json({
+        reply:
+          data?.error?.message ||
+          "حدث خطأ أثناء التواصل مع الذكاء الاصطناعي."
+      });
+    }
 
     const reply =
-      data.choices?.[0]?.message?.content ||
-      JSON.stringify(data);
+      data?.choices?.[0]?.message?.content ||
+      "تعذر إنشاء رد في الوقت الحالي.";
 
-    res.status(200).json({ reply });
+    return res.status(200).json({ reply });
 
-  } catch (err) {
-    res.status(200).json({
-      reply: "خطأ: " + err.message
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      reply: "حدث خطأ غير متوقع. حاول مرة أخرى."
     });
   }
 }
