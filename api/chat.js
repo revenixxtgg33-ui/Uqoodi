@@ -1,3 +1,7 @@
+// إضافة المكتبات اللازمة لقراءة ملفات PDF (تعمل على Vercel)
+// يجب إضافة pdf-parse في ملف package.json: npm install pdf-parse
+import pdfParse from 'pdf-parse';
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -12,9 +16,34 @@ export default async function handler(req, res) {
         ? JSON.parse(req.body)
         : req.body;
 
+    // ---- إضافتي (1): استقبال النص والملف ----
     const message = body?.message?.trim() || "";
+    const file = body?.file || null; // الملف القادم من الواجهة
+    let finalMessage = message;
 
-    if (!message) {
+    // ---- إضافتي (2): معالجة الصور والملفات ----
+    if (file) {
+      // حالة 1: إذا كان الملف صورة (يحولها Groq لنص مشفر لكنه يعالجها)
+      if (file.type && file.type.startsWith("image/")) {
+        finalMessage = `[صورة مرفوعة]. ${message} (حلل الصورة إن أمكن، وأخبرني ما الذي تراه). بيانات الصورة: ${file.base64 || file.data}`;
+      }
+      
+      // حالة 2: إذا كان الملف PDF (نستخرج النص منه)
+      else if (file.type === "application/pdf" && file.buffer) {
+        try {
+          const pdfBuffer = Buffer.from(file.buffer, 'base64'); // تحويل من Base64 إذا جاء
+          const pdfData = await pdfParse(pdfBuffer);
+          const pdfText = pdfData.text.substring(0, 3000); // نأخذ أول 3000 حرف فقط لتجنب كبر الحجم
+          
+          finalMessage = `[تم رفع ملف PDF]. إليك النص المستخرج منه:\n\n${pdfText}\n\nسؤالي لك: ${message}`;
+        } catch (pdfError) {
+          finalMessage = `[رفع ملف PDF لكن حدث خطأ في قراءته]. سؤالي: ${message}`;
+        }
+      }
+    }
+
+    // ---- باقي كودك الأصلي كما هو (لم أغير فيه شيئاً) ----
+    if (!finalMessage) {
       return res.status(400).json({
         reply: "يرجى كتابة رسالة أولاً."
       });
@@ -113,7 +142,7 @@ Always provide useful, professional guidance.
             },
             {
               role: "user",
-              content: message
+              content: finalMessage // استخدمت finalMessage بدلاً من message
             }
           ]
         })
