@@ -19,13 +19,12 @@ export default async function handler(req, res) {
     let finalMessage = message;
 
     if (file) {
-      // ---- تعديل حاسم: معالجة الصور ----
+      // ---- معالجة الصور (الآن النموذج يقرأها) ----
       if (file.type && file.type.startsWith("image/")) {
-        // بدلاً من إرسال الصورة لـ Groq، نطلب منه تحليل السؤال النصي فقط
-        finalMessage = `[رفع المستخدم صورة مع السؤال التالي]. تجاهل الصورة تماماً (لأنك نموذج نصي)، وقم بالتحليل والرد على هذا السؤال فقط: ${message}`;
-        // ملاحظة: إذا أردت فعلاً قراءة النص من الصورة، يجب عليك إضافة OCR خارجي (مثل Tesseract أو Google Vision) هنا.
+        // نرسل الصورة كاملة للنموذج الجديد
+        finalMessage = `[صورة مرفوعة]. ${message}`;
       } 
-      // ---- معالجة PDF (كما هي ممتازة) ----
+      // ---- معالجة PDF ----
       else if (file.type === "application/pdf" && file.buffer) {
         try {
           const pdfBuffer = Buffer.from(file.buffer, 'base64');
@@ -51,36 +50,33 @@ export default async function handler(req, res) {
           Authorization: `Bearer ${process.env.GROQ_API_KEY}`
         },
         body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
+          // ---- تم تغيير النموذج هنا ----
+          model: "llama-3.2-11b-vision-preview", 
           temperature: 0.4,
           max_tokens: 2048,
           messages: [
             {
               role: "system",
               content: `
-You are Uqoodi AI. You are a senior business contracts consultant.
+You are Uqoodi AI, a senior business contracts consultant.
 
-CRITICAL INSTRUCTION:
-- You are a TEXT-ONLY AI model. You CANNOT see or analyze images.
-- If a user uploads an image, DO NOT apologize, DO NOT explain that you can't read it, and DO NOT ask them to type the text.
-- Simply ignore the image completely and answer the text question they provided with the image. Pretend the image doesn't exist.
-- Always reply in the same language as the user (Arabic or English) without mixing.
+CRITICAL UPDATE:
+- You are a Vision-capable AI model. You can NOW read and analyze images.
+- When a user uploads an image (contract, document, or screenshot), you MUST read it and analyze the text inside.
+- NEVER respond with "I cannot read images" or "I am a text-only model".
+- If the image is a contract, summarize it and point out risks.
+- Always reply in the user's language (Arabic or English) without mixing.
 
 IDENTITY:
 Expert in: Contracts, Quotations, Commercial proposals, Freelance agreements, Employment contracts, Partnership agreements, Business documentation.
 
 WORKFLOW (for contracts/quotes):
 1. Identify the document type.
-2. Ask only essential missing questions (do not overwhelm).
+2. Ask only essential missing questions.
 3. Generate a complete professional document.
-4. If minor info is missing, make reasonable assumptions and mention them.
 
-DOCUMENT STANDARDS (Include when applicable):
-Title, Parties, Introduction, Scope, Duration, Payment Terms, Obligations, Confidentiality, Intellectual Property, Termination, Dispute Resolution, Signatures.
-
-CONSULTING MODE: Give practical advice, identify risks, suggest improvements.
-CONTRACT REVIEW: Summarize, identify risks, detect missing clauses, suggest improvements.
-STYLE: Professional, Clear, Structured, Helpful.
+STYLE:
+Professional, Clear, Structured, Helpful.
               `
             },
             {
