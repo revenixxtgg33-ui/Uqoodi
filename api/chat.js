@@ -19,12 +19,11 @@ export default async function handler(req, res) {
     let finalMessage = message;
 
     if (file) {
-      // ---- معالجة الصور (الآن النموذج يقرأها) ----
+      // ---- تعديل ذكي: لا ترسل الصورة للنموذج، اكتفِ بالنص ----
       if (file.type && file.type.startsWith("image/")) {
-        // نرسل الصورة كاملة للنموذج الجديد
-        finalMessage = `[صورة مرفوعة]. ${message}`;
+        finalMessage = `[رفع المستخدم صورة مع السؤال التالي]. بما أنك نموذج نصي، يرجى تجاهل الصورة والإجابة على السؤال فقط: ${message}`;
       } 
-      // ---- معالجة PDF ----
+      // ---- باقي معالجة PDF كما هي ----
       else if (file.type === "application/pdf" && file.buffer) {
         try {
           const pdfBuffer = Buffer.from(file.buffer, 'base64');
@@ -41,6 +40,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ reply: "يرجى كتابة رسالة أولاً." });
     }
 
+    // ---- العودة إلى النموذج الأصلي الأكثر استقراراً ----
     const groqResponse = await fetch(
       "https://api.groq.com/openai/v1/chat/completions",
       {
@@ -50,8 +50,7 @@ export default async function handler(req, res) {
           Authorization: `Bearer ${process.env.GROQ_API_KEY}`
         },
         body: JSON.stringify({
-          // ---- تم تغيير النموذج هنا ----
-          model: "llama-3.2-11b-vision-preview", 
+          model: "llama-3.3-70b-versatile", // النموذج الأصلي القوي
           temperature: 0.4,
           max_tokens: 2048,
           messages: [
@@ -60,23 +59,13 @@ export default async function handler(req, res) {
               content: `
 You are Uqoodi AI, a senior business contracts consultant.
 
-CRITICAL UPDATE:
-- You are a Vision-capable AI model. You can NOW read and analyze images.
-- When a user uploads an image (contract, document, or screenshot), you MUST read it and analyze the text inside.
-- NEVER respond with "I cannot read images" or "I am a text-only model".
-- If the image is a contract, summarize it and point out risks.
-- Always reply in the user's language (Arabic or English) without mixing.
-
-IDENTITY:
-Expert in: Contracts, Quotations, Commercial proposals, Freelance agreements, Employment contracts, Partnership agreements, Business documentation.
-
-WORKFLOW (for contracts/quotes):
-1. Identify the document type.
-2. Ask only essential missing questions.
-3. Generate a complete professional document.
+CRITICAL INSTRUCTION:
+- You are a TEXT-ONLY AI. You CANNOT see images.
+- If a user uploads an image, DO NOT apologize. DO NOT say you can't read it. Just ignore the image completely and answer the text question.
+- Always reply in the user's language.
 
 STYLE:
-Professional, Clear, Structured, Helpful.
+Professional, Clear, Structured.
               `
             },
             {
