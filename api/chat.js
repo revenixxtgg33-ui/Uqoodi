@@ -1,5 +1,3 @@
-// إضافة المكتبات اللازمة لقراءة ملفات PDF (تعمل على Vercel)
-// يجب إضافة pdf-parse في ملف package.json: npm install pdf-parse
 import pdfParse from 'pdf-parse';
 
 export default async function handler(req, res) {
@@ -16,25 +14,23 @@ export default async function handler(req, res) {
         ? JSON.parse(req.body)
         : req.body;
 
-    // ---- إضافتي (1): استقبال النص والملف ----
     const message = body?.message?.trim() || "";
-    const file = body?.file || null; // الملف القادم من الواجهة
+    const file = body?.file || null; 
     let finalMessage = message;
 
-    // ---- إضافتي (2): معالجة الصور والملفات ----
     if (file) {
-      // حالة 1: إذا كان الملف صورة (يحولها Groq لنص مشفر لكنه يعالجها)
+      // ---- تعديل حاسم: معالجة الصور ----
       if (file.type && file.type.startsWith("image/")) {
-        finalMessage = `[صورة مرفوعة]. ${message} (حلل الصورة إن أمكن، وأخبرني ما الذي تراه). بيانات الصورة: ${file.base64 || file.data}`;
-      }
-      
-      // حالة 2: إذا كان الملف PDF (نستخرج النص منه)
+        // بدلاً من إرسال الصورة لـ Groq، نطلب منه تحليل السؤال النصي فقط
+        finalMessage = `[رفع المستخدم صورة مع السؤال التالي]. تجاهل الصورة تماماً (لأنك نموذج نصي)، وقم بالتحليل والرد على هذا السؤال فقط: ${message}`;
+        // ملاحظة: إذا أردت فعلاً قراءة النص من الصورة، يجب عليك إضافة OCR خارجي (مثل Tesseract أو Google Vision) هنا.
+      } 
+      // ---- معالجة PDF (كما هي ممتازة) ----
       else if (file.type === "application/pdf" && file.buffer) {
         try {
-          const pdfBuffer = Buffer.from(file.buffer, 'base64'); // تحويل من Base64 إذا جاء
+          const pdfBuffer = Buffer.from(file.buffer, 'base64');
           const pdfData = await pdfParse(pdfBuffer);
-          const pdfText = pdfData.text.substring(0, 3000); // نأخذ أول 3000 حرف فقط لتجنب كبر الحجم
-          
+          const pdfText = pdfData.text.substring(0, 3000); 
           finalMessage = `[تم رفع ملف PDF]. إليك النص المستخرج منه:\n\n${pdfText}\n\nسؤالي لك: ${message}`;
         } catch (pdfError) {
           finalMessage = `[رفع ملف PDF لكن حدث خطأ في قراءته]. سؤالي: ${message}`;
@@ -42,11 +38,8 @@ export default async function handler(req, res) {
       }
     }
 
-    // ---- باقي كودك الأصلي كما هو (لم أغير فيه شيئاً) ----
     if (!finalMessage) {
-      return res.status(400).json({
-        reply: "يرجى كتابة رسالة أولاً."
-      });
+      return res.status(400).json({ reply: "يرجى كتابة رسالة أولاً." });
     }
 
     const groqResponse = await fetch(
@@ -65,84 +58,34 @@ export default async function handler(req, res) {
             {
               role: "system",
               content: `
-You are Uqoodi AI.
+You are Uqoodi AI. You are a senior business contracts consultant.
 
-You are a senior business contracts consultant specialized in Arabic and GCC markets.
+CRITICAL INSTRUCTION:
+- You are a TEXT-ONLY AI model. You CANNOT see or analyze images.
+- If a user uploads an image, DO NOT apologize, DO NOT explain that you can't read it, and DO NOT ask them to type the text.
+- Simply ignore the image completely and answer the text question they provided with the image. Pretend the image doesn't exist.
+- Always reply in the same language as the user (Arabic or English) without mixing.
 
 IDENTITY:
-You are not a generic AI chatbot.
-You are an expert in:
-- Contracts
-- Quotations
-- Commercial proposals
-- Freelance agreements
-- Employment contracts
-- Partnership agreements
-- Business documentation
+Expert in: Contracts, Quotations, Commercial proposals, Freelance agreements, Employment contracts, Partnership agreements, Business documentation.
 
-LANGUAGE:
-- Always reply in the same language as the user.
-- If the user writes Arabic, reply in professional Arabic.
-- If the user writes English, reply in English.
-- Never mix languages unless requested.
-
-DOCUMENT CREATION WORKFLOW:
-
-When a user asks for a contract, quotation, proposal, agreement or business document:
-
+WORKFLOW (for contracts/quotes):
 1. Identify the document type.
-2. Ask only the essential missing questions.
-3. Do not overwhelm the user with too many questions.
-4. Gather enough information.
-5. Generate the complete document professionally.
-6. If minor information is missing, make reasonable assumptions and clearly mention them.
+2. Ask only essential missing questions (do not overwhelm).
+3. Generate a complete professional document.
+4. If minor info is missing, make reasonable assumptions and mention them.
 
-DOCUMENT STANDARDS:
+DOCUMENT STANDARDS (Include when applicable):
+Title, Parties, Introduction, Scope, Duration, Payment Terms, Obligations, Confidentiality, Intellectual Property, Termination, Dispute Resolution, Signatures.
 
-Every generated document should include when applicable:
-- Title
-- Parties
-- Introduction
-- Scope of Work
-- Duration
-- Payment Terms
-- Obligations
-- Confidentiality
-- Intellectual Property
-- Termination
-- Dispute Resolution
-- Signatures
-
-CONSULTING MODE:
-
-When users ask business questions:
-- Give practical advice.
-- Identify risks.
-- Suggest improvements.
-- Provide actionable recommendations.
-
-CONTRACT REVIEW MODE:
-
-If a user provides an existing contract:
-- Summarize it.
-- Identify risks.
-- Detect missing clauses.
-- Suggest improvements.
-
-STYLE:
-- Professional
-- Clear
-- Structured
-- Helpful
-- Business-focused
-
-Never give shallow one-line answers.
-Always provide useful, professional guidance.
+CONSULTING MODE: Give practical advice, identify risks, suggest improvements.
+CONTRACT REVIEW: Summarize, identify risks, detect missing clauses, suggest improvements.
+STYLE: Professional, Clear, Structured, Helpful.
               `
             },
             {
               role: "user",
-              content: finalMessage // استخدمت finalMessage بدلاً من message
+              content: finalMessage
             }
           ]
         })
@@ -153,23 +96,15 @@ Always provide useful, professional guidance.
 
     if (!groqResponse.ok) {
       return res.status(500).json({
-        reply:
-          data?.error?.message ||
-          "حدث خطأ أثناء التواصل مع الذكاء الاصطناعي."
+        reply: data?.error?.message || "حدث خطأ أثناء التواصل مع الذكاء الاصطناعي."
       });
     }
 
-    const reply =
-      data?.choices?.[0]?.message?.content ||
-      "تعذر إنشاء رد في الوقت الحالي.";
-
+    const reply = data?.choices?.[0]?.message?.content || "تعذر إنشاء رد في الوقت الحالي.";
     return res.status(200).json({ reply });
 
   } catch (error) {
     console.error(error);
-
-    return res.status(500).json({
-      reply: "حدث خطأ غير متوقع. حاول مرة أخرى."
-    });
+    return res.status(500).json({ reply: "حدث خطأ غير متوقع. حاول مرة أخرى." });
   }
 }
