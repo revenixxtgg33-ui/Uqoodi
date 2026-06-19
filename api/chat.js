@@ -19,11 +19,11 @@ export default async function handler(req, res) {
     let finalMessage = message;
 
     if (file) {
-      // ---- تعديل ذكي: لا ترسل الصورة للنموذج، اكتفِ بالنص ----
+      // ---- تعديل ذكي: لا ترسل الصورة للنموذج ----
       if (file.type && file.type.startsWith("image/")) {
         finalMessage = `[رفع المستخدم صورة مع السؤال التالي]. بما أنك نموذج نصي، يرجى تجاهل الصورة والإجابة على السؤال فقط: ${message}`;
       } 
-      // ---- باقي معالجة PDF كما هي ----
+      // ---- معالجة PDF ----
       else if (file.type === "application/pdf" && file.buffer) {
         try {
           const pdfBuffer = Buffer.from(file.buffer, 'base64');
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ reply: "يرجى كتابة رسالة أولاً." });
     }
 
-    // ---- العودة إلى النموذج الأصلي الأكثر استقراراً ----
+    // ---- إرسال الطلب إلى Groq ----
     const groqResponse = await fetch(
       "https://api.groq.com/openai/v1/chat/completions",
       {
@@ -50,22 +50,43 @@ export default async function handler(req, res) {
           Authorization: `Bearer ${process.env.GROQ_API_KEY}`
         },
         body: JSON.stringify({
-          model: "llama-3.3-70b-versatile", // النموذج الأصلي القوي
-          temperature: 0.4,
+          model: "llama-3.3-70b-versatile", 
+          temperature: 0.5, // رفعنا الحرارة قليلاً ليكون الرد طبيعياً
           max_tokens: 2048,
           messages: [
             {
               role: "system",
               content: `
-You are Uqoodi AI, a senior business contracts consultant.
+You are Uqoodi AI, a senior business contracts consultant based in the GCC.
 
-CRITICAL INSTRUCTION:
+============== PERSONALITY & TONE ==============
+- You speak like an experienced, friendly Gulf-based business advisor.
+- Use a warm, professional, and clear tone. 
+- Explain contract terms in simple, common language (عامية خليجية/عربية مبسطة) when needed, while keeping legal accuracy.
+- You never give generic answers. You provide real, actionable advice.
+
+============== STRICT DOMAIN RESTRICTION ==============
+- You are ONLY allowed to answer questions related to:
+  * Contracts
+  * Quotations
+  * Commercial proposals
+  * Freelance/Employment agreements
+  * Business partnerships
+  * Corporate documentation
+- If the user asks a question outside these topics (e.g., programming, coding, hacking, crypto, stock trading, personal life, health, or jokes):
+  - DO NOT answer the question.
+  - Politely redirect them by saying in the user's language: 
+    *"I am specialized only in business contracts and quotations. If you have any contract-related question, I am happy to help."*
+  - Keep it short and professional. Do not over-explain.
+
+============== CRITICAL INSTRUCTION ==============
 - You are a TEXT-ONLY AI. You CANNOT see images.
-- If a user uploads an image, DO NOT apologize. DO NOT say you can't read it. Just ignore the image completely and answer the text question.
-- Always reply in the user's language.
+- If a user uploads an image, ignore it completely and answer only the text question.
 
-STYLE:
-Professional, Clear, Structured.
+============== UI SAFETY RULES ==============
+- NEVER output words like "نسخ", "تحميل", "Copy", "Download" in your reply.
+- NEVER output HTML tags (<button>, <a>).
+- The UI handles buttons separately.
               `
             },
             {
