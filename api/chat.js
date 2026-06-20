@@ -14,7 +14,20 @@ export default async function handler(req, res) {
         ? JSON.parse(req.body)
         : req.body;
 
-    const message = body?.message?.trim() || "";
+    const incomingMessages = Array.isArray(body?.messages) ? body.messages : null;
+    // Last user message text (fallback to `message` field for older clients)
+    const lastUserMsg = incomingMessages
+      ? (() => {
+          for (let i = incomingMessages.length - 1; i >= 0; i--) {
+            if (incomingMessages[i]?.role === "user") {
+              const c = incomingMessages[i].content;
+              return typeof c === "string" ? c.trim() : "";
+            }
+          }
+          return "";
+        })()
+      : (body?.message?.trim() || "");
+    const message = lastUserMsg;
     const file = body?.file || null;
     let finalMessage = message;
 
@@ -56,23 +69,12 @@ export default async function handler(req, res) {
       return res.status(400).json({ reply: "يرجى كتابة رسالة أولاً." });
     }
 
-    // ---- Send to Groq ----
-    const groqResponse = await fetch(
-      "https://api.groq.com/openai/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.GROQ_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          temperature: 0.5,
-          max_tokens: 2048,
-          messages: [
-            {
-              role: "system",
-              content: `
+    // ---- Build conversation messages: system prompt + prior history + current user message ----
+    // If a file is attached, the LAST user message is replaced with `finalMessage` (which
+    // embeds the extracted PDF text or image notice) so the model has full context.
+    const systemPrompt = {
+      role: "system",
+      content: `
 You are Uqoodi AI, a senior business contracts consultant based in the GCC.
 
 ============== PERSONALITY & TONE ==============
@@ -80,6 +82,7 @@ You are Uqoodi AI, a senior business contracts consultant based in the GCC.
 - Use a warm, professional, and clear tone.
 - Explain contract terms in simple, common language (عامية خليجية/عربية مبسطة) when needed, while keeping legal accuracy.
 - You never give generic answers. You provide real, actionable advice.
+- You REMEMBER prior messages in this conversation and refer back to them when relevant.
 
 ============== STRICT DOMAIN RESTRICTION ==============
 - You are ONLY allowed to answer questions related to:
@@ -154,12 +157,42 @@ If you violate these rules, the UI will show DUPLICATE buttons and the user
 will be confused. The buttons are already there — never write copy/download
 instructions, labels, or hints.
               `
-            },
-            {
-              role: "user",
-              content: finalMessage
-            }
-          ]
+    };
+
+    // Sanitize incoming history into the shape Groq expects
+    let convo = [];
+    if (incomingMessages && incomingMessages.length) {
+      convo = incomingMessages
+        .filter(m => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+        .map(m => ({ role: m.role, content: m.content }));
+    }
+
+    // Ensure the last user message carries the file-augmented `finalMessage`
+    if (convo.length && convo[convo.length - 1].role === "user") {
+      convo[convo.length - 1] = { role: "user", content: finalMessage };
+    } else {
+      convo.push({ role: "user", content: finalMessage });
+    }
+
+    // Keep only the last ~20 turns to stay within token limits
+    if (convo.length > 20) convo = convo.slice(-20);
+
+    const groqMessages = [systemPrompt, ...convo];
+
+    // ---- Send to Groq ----
+    const groqResponse = await fetch(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          temperature: 0.5,
+          max_tokens: 2048,
+          messages: groqMessages
         })
       }
     );
