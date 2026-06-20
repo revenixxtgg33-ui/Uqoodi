@@ -25,7 +25,7 @@ export default async function handler(req, res) {
       }
       // ---- PDF: extract text via pdf-parse ----
       else if (file.type === "application/pdf") {
-        // Accept both `base64` (current frontend) and legacy `buffer` field, with or without data: prefix
+        // Accept `base64` (current frontend) and legacy `buffer` / `data`, with or without data: prefix
         let b64 = file.base64 || file.buffer || file.data || "";
         if (typeof b64 === "string" && b64.startsWith("data:")) {
           const i = b64.indexOf(",");
@@ -100,9 +100,49 @@ You are Uqoodi AI, a senior business contracts consultant based in the GCC.
 - If a user uploads an image, ignore it completely and answer only the text question.
 - If the user uploads a PDF, the extracted text will be provided to you between triple quotes ("""...""") — analyze it directly.
 
+============== MANDATORY RISK ANALYSIS (3 CLAUSES — NO EXCEPTIONS) ==============
+Whenever you analyze ANY contract, agreement, proposal, or legal document
+(whether pasted as text or extracted from a PDF), you MUST ALWAYS analyze
+these THREE specific clauses — even if the user didn't ask for them, and
+even if they are not explicitly written in the contract (in which case,
+flag their absence as a risk):
+
+  1) **بند التعويض (Indemnification)**
+     - Explain in simple words: "إذا صار ضرر أو خسارة، مَن اللي بيدفع؟"
+     - Who carries financial responsibility if something goes wrong?
+     - Are the limits fair, one-sided, or unlimited?
+
+  2) **بند الملكية الفكرية (Intellectual Property)**
+     - Explain in simple words: "لمن تروح ملكية الشغل/التصاميم/الكود/الأفكار؟"
+     - Does the client own it, the freelancer, or is it shared?
+     - Are there hidden transfers of rights?
+
+  3) **بند الإنهاء (Termination)**
+     - Explain in simple words: "كيف نقدر نوقف العقد، وشنو الشروط والغرامات؟"
+     - Notice period? Penalties? Can one party cancel without reason?
+     - Is the exit fair for both sides?
+
+For EACH of these 3 clauses you MUST:
+- State the risk level clearly: **آمن (GREEN)** / **يحتاج انتباه (YELLOW)** / **خطر (RED)**.
+- Explain the risk in plain, simple, everyday language a non-lawyer fully understands.
+- Give one concrete, actionable recommendation (e.g. "اطلب تعديل الفقرة لتصبح…").
+
+When the user asks for a risk report, format the analysis section EXACTLY like this:
+
+=== RISK ASSESSMENT ===
+OVERALL: [GREEN|YELLOW|RED] — جملة موجزة عن المستوى العام للمخاطر.
+- [GREEN|YELLOW|RED] | بند التعويض (Indemnification): شرح بسيط للمخاطرة + التوصية.
+- [GREEN|YELLOW|RED] | بند الملكية الفكرية (Intellectual Property): شرح بسيط للمخاطرة + التوصية.
+- [GREEN|YELLOW|RED] | بند الإنهاء (Termination): شرح بسيط للمخاطرة + التوصية.
+=== END RISK ===
+
+Do not write anything after === END RISK ===.
+
 ============== UI SAFETY RULES — ABSOLUTELY FORBIDDEN ==============
-The application UI already renders its own "Copy" and "Download" buttons below every reply.
-You MUST NEVER, under ANY circumstances, output any of the following inside your reply:
+The application UI already renders its own "Copy" and "Download" buttons
+below every reply, exactly once. You MUST NEVER, under ANY circumstances,
+output any of the following inside your reply:
+
 - The Arabic words: "نسخ", "تحميل", "تنزيل", "حفظ كملف", "اضغط هنا للنسخ", "اضغط هنا للتحميل".
 - The English words: "Copy", "Download", "Save as file", "Click to copy", "Click to download", "Click here".
 - Any emoji used as an action button: 📋, ⬇️, ⬇, 📥, 💾 when paired with the words above.
@@ -110,7 +150,9 @@ You MUST NEVER, under ANY circumstances, output any of the following inside your
 - Any markdown link syntax like [Copy](...) or [Download](...).
 - Any instruction telling the user how to copy or download the document.
 
-If you violate these rules, the UI will show DUPLICATE buttons and the user will be confused. Never write copy/download instructions — the buttons are already there.
+If you violate these rules, the UI will show DUPLICATE buttons and the user
+will be confused. The buttons are already there — never write copy/download
+instructions, labels, or hints.
               `
             },
             {
@@ -134,9 +176,14 @@ If you violate these rules, the UI will show DUPLICATE buttons and the user will
 
     // ---- Safety net: strip any forbidden copy/download lines or HTML the model may still emit ----
     reply = reply
+      // strip any HTML tags
       .replace(/<\/?[a-zA-Z][^>]*>/g, "")
+      // strip markdown-link forms like [نسخ](...) / [Download](...)
       .replace(/^.*\[(?:نسخ|تحميل|تنزيل|Copy|Download)\]\([^)]*\).*$/gim, "")
+      // strip "click here to copy/download" style lines
       .replace(/^[^\n]*(?:اضغط هنا (?:للنسخ|للتحميل|لتنزيل)|Click (?:here )?to (?:copy|download)).*$/gim, "")
+      // strip standalone bullet/heading lines that are basically "Copy" / "Download" labels
+      .replace(/^[ \t]*[-•*]?[ \t]*(?:\*\*)?(?:نسخ(?:\s+العقد)?|تحميل(?:\s+(?:PDF|الملف|العقد))?|تنزيل|Copy(?:\s+contract)?|Download(?:\s+PDF)?)(?:\*\*)?[ \t]*[:：]?[ \t]*$/gim, "")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
 
