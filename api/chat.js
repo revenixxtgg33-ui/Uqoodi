@@ -1,5 +1,90 @@
 import pdfParse from 'pdf-parse';
 
+const MIN_PDF_TEXT_CHARS = 50;
+const MAX_PDF_TEXT_CHARS = 12000;
+
+function cleanBase64(input = "") {
+  let b64 = String(input || "");
+  if (b64.startsWith("data:")) {
+    const i = b64.indexOf(",");
+    if (i >= 0) b64 = b64.substring(i + 1);
+  }
+  return b64.replace(/\s/g, "");
+}
+
+function normalizePdfText(text = "") {
+  return String(text || "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+async function extractWithGeminiOcr(pdfBase64) {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (!apiKey) return "";
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { text: "Extract all readable contract text from this PDF. Return only the extracted text, preserving Arabic and English as accurately as possible." },
+              { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }
+            ]
+          }
+        ],
+        generationConfig: { temperature: 0 }
+      })
+    }
+  );
+
+  const result = await response.json();
+  if (!response.ok) {
+    console.error("Gemini OCR error:", result);
+    return "";
+  }
+
+  return normalizePdfText(result?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("\n") || "");
+}
+
+async function extractPdfText(file) {
+  const clientText = normalizePdfText(file?.text || file?.extractedText || "");
+  if (clientText.length >= MIN_PDF_TEXT_CHARS) {
+    return { text: clientText.substring(0, MAX_PDF_TEXT_CHARS), reason: "browser" };
+  }
+
+  const b64 = cleanBase64(file?.base64 || file?.buffer || file?.data || "");
+  if (!b64) return { text: "", reason: "missing_base64" };
+
+  let nativeText = "";
+  try {
+    const pdfBuffer = Buffer.from(b64, "base64");
+    const pdfData = await pdfParse(pdfBuffer);
+    nativeText = normalizePdfText(pdfData.text || "");
+  } catch (pdfError) {
+    console.error("pdf-parse error:", pdfError);
+  }
+
+  if (nativeText.length >= MIN_PDF_TEXT_CHARS) {
+    return { text: nativeText.substring(0, MAX_PDF_TEXT_CHARS), reason: "native" };
+  }
+
+  try {
+    const ocrText = await extractWithGeminiOcr(b64);
+    if (ocrText.length >= MIN_PDF_TEXT_CHARS) {
+      return { text: ocrText.substring(0, MAX_PDF_TEXT_CHARS), reason: "ocr" };
+    }
+  } catch (ocrError) {
+    console.error("OCR fallback error:", ocrError);
+  }
+
+  return { text: nativeText.substring(0, MAX_PDF_TEXT_CHARS), reason: "empty" };
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -36,31 +121,16 @@ export default async function handler(req, res) {
       if (file.type && file.type.startsWith("image/")) {
         finalMessage = `[رفع المستخدم صورة مع السؤال التالي]. بما أنك نموذج نصي، يرجى تجاهل الصورة والإجابة على السؤال فقط: ${message}`;
       }
-      // ---- PDF: extract text via pdf-parse ----
-      else if (file.type === "application/pdf") {
-        // Accept `base64` (current frontend) and legacy `buffer` / `data`, with or without data: prefix
-        let b64 = file.base64 || file.buffer || file.data || "";
-        if (typeof b64 === "string" && b64.startsWith("data:")) {
-          const i = b64.indexOf(",");
-          if (i >= 0) b64 = b64.substring(i + 1);
-        }
-
-        if (!b64) {
+      // ---- PDF: extract text natively, then fallback to OCR for scanned/image PDFs ----
+      else if (file.type === "application/pdf" || /\.pdf$/i.test(file.name || "")) {
+        const extracted = await extractPdfText(file);
+        if (extracted.reason === "missing_base64") {
           finalMessage = `[رفع المستخدم ملف PDF لكن لم يصل محتواه]. السؤال: ${message}`;
+        } else if (!extracted.text) {
+          finalMessage = `[تم رفع ملف PDF لكن لم يُستخرج منه نص واضح حتى بعد محاولة قراءة الملف بالـ OCR]. السؤال: ${message}`;
         } else {
-          try {
-            const pdfBuffer = Buffer.from(b64, "base64");
-            const pdfData = await pdfParse(pdfBuffer);
-            const pdfText = (pdfData.text || "").trim().substring(0, 6000);
-            if (!pdfText) {
-              finalMessage = `[تم رفع ملف PDF لكن لم يُستخرج منه نص — قد يكون صورة ممسوحة ضوئياً]. السؤال: ${message}`;
-            } else {
-              finalMessage = `[تم رفع ملف PDF — اسم الملف: ${file.name || "document.pdf"}]. النص المستخرج من الملف:\n\n"""${pdfText}"""\n\nاعتمد على النص أعلاه في إجابتك.\nسؤال المستخدم: ${message || "الرجاء تحليل هذا العقد وتلخيص أهم بنوده ومخاطره."}`;
-            }
-          } catch (pdfError) {
-            console.error("pdf-parse error:", pdfError);
-            finalMessage = `[رفع ملف PDF لكن حدث خطأ في قراءته]. سؤالي: ${message}`;
-          }
+          const readMethod = extracted.reason === "ocr" ? "OCR" : (extracted.reason === "browser" ? "المتصفح" : "نص مباشر");
+          finalMessage = `[تم رفع ملف PDF — اسم الملف: ${file.name || "document.pdf"} — طريقة القراءة: ${readMethod}]. النص المستخرج من الملف:\n\n"""${extracted.text}"""\n\nاعتمد على النص أعلاه في إجابتك.\nسؤال المستخدم: ${message || "الرجاء تحليل هذا العقد وتلخيص أهم بنوده ومخاطره."}`;
         }
       }
     }
