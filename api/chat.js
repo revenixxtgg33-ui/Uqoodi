@@ -296,4 +296,4 @@ instructions, labels, or hints.
     console.error(error);
     return res.status(500).json({ reply: "حدث خطأ غير متوقع. حاول مرة أخرى." });
   }
-}
+          }
