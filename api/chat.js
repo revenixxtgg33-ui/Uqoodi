@@ -20,7 +20,7 @@ function normalizePdfText(text = "") {
 }
 
 async function extractWithGeminiOcr(pdfBase64) {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) return "";
 
   const response = await fetch(
@@ -100,37 +100,36 @@ export default async function handler(req, res) {
         : req.body;
 
     const incomingMessages = Array.isArray(body?.messages) ? body.messages : null;
-    // Last user message text (fallback to `message` field for older clients)
-    const lastUserMsg = incomingMessages
-      ? (() => {
-          for (let i = incomingMessages.length - 1; i >= 0; i--) {
-            if (incomingMessages[i]?.role === "user") {
-              const c = incomingMessages[i].content;
-              return typeof c === "string" ? c.trim() : "";
-            }
-          }
-          return "";
-        })()
-      : (body?.message?.trim() || "");
-    const message = lastUserMsg;
-    const file = body?.file || null;
-    let finalMessage = message;
-
-    if (file) {
-      // ---- Image: ignore (text-only model) ----
-      if (file.type && file.type.startsWith("image/")) {
-        finalMessage = `[رفع المستخدم صورة مع السؤال التالي]. بما أنك نموذج نصي، يرجى تجاهل الصورة والإجابة على السؤال فقط: ${message}`;
+    
+    // استخراج آخر رسالة مستخدم
+    let lastUserMsg = body?.message?.trim() || "";
+    if (!lastUserMsg && incomingMessages) {
+      for (let i = incomingMessages.length - 1; i >= 0; i--) {
+        if (incomingMessages[i]?.role === "user") {
+          const c = incomingMessages[i].content;
+          lastUserMsg = typeof c === "string" ? c.trim() : "";
+          break;
+        }
       }
-      // ---- PDF: extract text natively, then fallback to OCR for scanned/image PDFs ----
+    }
+
+    const file = body?.file || null;
+    let finalMessage = lastUserMsg;
+
+    // معالجة الملفات المرفوعة
+    if (file) {
+      if (file.type && file.type.startsWith("image/")) {
+        finalMessage = `[رفع المستخدم صورة مع السؤال التالي]. بما أنك نموذج نصي، يرجى تجاهل الصورة والإجابة على السؤال فقط: ${lastUserMsg}`;
+      }
       else if (file.type === "application/pdf" || /\.pdf$/i.test(file.name || "")) {
         const extracted = await extractPdfText(file);
         if (extracted.reason === "missing_base64") {
-          finalMessage = `[رفع المستخدم ملف PDF لكن لم يصل محتواه]. السؤال: ${message}`;
+          finalMessage = `[رفع المستخدم ملف PDF لكن لم يصل محتواه]. السؤال: ${lastUserMsg}`;
         } else if (!extracted.text) {
-          finalMessage = `[تم رفع ملف PDF لكن لم يُستخرج منه نص واضح حتى بعد محاولة قراءة الملف بالـ OCR]. السؤال: ${message}`;
+          finalMessage = `[تم رفع ملف PDF لكن لم يُستخرج منه نص واضح حتى بعد محاولة قراءة الملف بالـ OCR]. السؤال: ${lastUserMsg}`;
         } else {
           const readMethod = extracted.reason === "ocr" ? "OCR" : (extracted.reason === "browser" ? "المتصفح" : "نص مباشر");
-          finalMessage = `[تم رفع ملف PDF — اسم الملف: ${file.name || "document.pdf"} — طريقة القراءة: ${readMethod}]. النص المستخرج من الملف:\n\n"""${extracted.text}"""\n\nاعتمد على النص أعلاه في إجابتك.\nسؤال المستخدم: ${message || "الرجاء تحليل هذا العقد وتلخيص أهم بنوده ومخاطره."}`;
+          finalMessage = `[تم رفع ملف PDF — اسم الملف: ${file.name || "document.pdf"} — طريقة القراءة: ${readMethod}]. النص المستخرج من الملف:\n\n"""${extracted.text}"""\n\nاعتمد على النص أعلاه في إجابتك.\nسؤال المستخدم: ${lastUserMsg || "الرجاء تحليل هذا العقد وتلخيص أهم بنوده ومخاطره."}`;
         }
       }
     }
@@ -139,10 +138,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ reply: "يرجى كتابة رسالة أولاً." });
     }
 
-    // ---- Build conversation messages: system prompt + prior history + current user message ----
-    // If a file is attached, the LAST user message is replaced with `finalMessage` (which
-    // embeds the extracted PDF text or image notice) so the model has full context.
-
+    // ----- بناء المحادثة -----
     const systemPrompt = {
       role: "system",
       content: `
@@ -218,7 +214,7 @@ The UI already renders Copy/Download buttons. NEVER output:
 `
     };
 
-    // Sanitize incoming history into the shape the chat API expects
+    // ترتيب الرسائل
     let convo = [];
     if (incomingMessages && incomingMessages.length) {
       convo = incomingMessages
@@ -226,24 +222,24 @@ The UI already renders Copy/Download buttons. NEVER output:
         .map(m => ({ role: m.role, content: m.content }));
     }
 
-    // Ensure the last user message carries the file-augmented `finalMessage`
+    // استبدال آخر رسالة مستخدم بالرسالة المحدثة (مع الملفات)
     if (convo.length && convo[convo.length - 1].role === "user") {
       convo[convo.length - 1] = { role: "user", content: finalMessage };
     } else {
       convo.push({ role: "user", content: finalMessage });
     }
 
-    // Keep only the last ~20 turns to stay within token limits
+    // الاحتفاظ بآخر 20 رسالة فقط للحفاظ على حدود الحجم
     if (convo.length > 20) convo = convo.slice(-20);
 
-    const apiKey = process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY;
+    // استخدام مفتاح Groq فقط
+    const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
-      return res.status(500).json({ reply: "لم يتم تعيين مفتاح API للدردشة (GROQ_API_KEY أو OPENAI_API_KEY)." });
+      return res.status(500).json({ reply: "لم يتم تعيين مفتاح GROQ_API_KEY في البيئة." });
     }
 
-    const useGroq = !!process.env.GROQ_API_KEY;
-    const endpoint = useGroq ? "https://api.groq.com/openai/v1/chat/completions" : "https://api.openai.com/v1/chat/completions";
-    const model = useGroq ? "llama-3.3-70b-versatile" : "gpt-4o-mini";
+    const endpoint = "https://api.groq.com/openai/v1/chat/completions";
+    const model = "llama-3.3-70b-versatile";
 
     const response = await fetch(endpoint, {
       method: "POST",
@@ -268,6 +264,7 @@ The UI already renders Copy/Download buttons. NEVER output:
 
     let reply = result?.choices?.[0]?.message?.content || "عذراً، لم أتمكن من توليد رد.";
 
+    // تنظيف إضافي
     reply = reply
       .replace(/^[ \t]*[-•*]?[ \t]*(?:\*\*)?(?:نسخ(?:\s+العقد)?|تحميل(?:\s+(?:PDF|الملف|العقد))?|تنزيل|Copy(?:\s+contract)?|Download(?:\s+PDF)?)(?:\*\*)?[ \t]*[:：]?[ \t]*$/gim, "")
       .replace(/\n{3,}/g, "\n\n")
