@@ -73,6 +73,7 @@ async function extractPdfText(file) {
     return { text: nativeText.substring(0, MAX_PDF_TEXT_CHARS), reason: "native" };
   }
 
+  // Fallback to Gemini OCR
   try {
     const ocrText = await extractWithGeminiOcr(b64);
     if (ocrText.length >= MIN_PDF_TEXT_CHARS) {
@@ -262,4 +263,4 @@ The UI already renders Copy/Download buttons. NEVER output:
     console.error(error);
     return res.status(500).json({ reply: "حدث خطأ غير متوقع. حاول مرة أخرى." });
   }
-            }
+}
