@@ -139,10 +139,11 @@ export default async function handler(req, res) {
       return res.status(400).json({ reply: "يرجى كتابة رسالة أولاً." });
     }
 
-    // ---- Build conversation messages: system prompt + prior history + current user message ----
-    // If a file is attached, the LAST user message is replaced with `finalMessage` (which
-    // embeds the extracted PDF text or image notice) so the model has full context.
+    // ---- ADDED: Force Language Rule ----
+    // This ensures the AI replies in the exact language of the user.
+    const languageHint = `Reply in the EXACT same language as the user's message (if the user wrote in English, reply in English; if Arabic, reply in Arabic). Do NOT mix languages.`;
 
+    // ---- Build conversation messages ----
     const systemPrompt = {
       role: "system",
       content: `
@@ -261,4 +262,4 @@ The UI already renders Copy/Download buttons. NEVER output:
     console.error(error);
     return res.status(500).json({ reply: "حدث خطأ غير متوقع. حاول مرة أخرى." });
   }
-}
+  }
