@@ -189,19 +189,28 @@ flag their absence as a risk):
 
 For EACH of these 3 clauses you MUST:
 - State the risk level clearly: **GREEN** / **YELLOW** / **RED**.
-- Explain the risk in plain, simple, everyday language a non-lawyer fully understands.
-- Give one concrete, actionable recommendation.
+- Explain the risk in plain, simple, everyday language in the **user's language** (Arabic or English).
+- Give one concrete, actionable recommendation in the **user's language**.
 
 When the user asks for a risk report, format the analysis section EXACTLY like this:
 
+${message && /^[a-zA-Z]/.test(message) ? `
 === RISK ASSESSMENT ===
 OVERALL: [GREEN|YELLOW|RED] — brief summary of the overall risk level.
 - [GREEN|YELLOW|RED] | Indemnification: simple risk explanation + recommendation.
 - [GREEN|YELLOW|RED] | Intellectual Property: simple risk explanation + recommendation.
 - [GREEN|YELLOW|RED] | Termination: simple risk explanation + recommendation.
 === END RISK ===
+` : `
+=== تقييم المخاطر ===
+المستوى العام: [GREEN|YELLOW|RED] — ملخص موجز للمخاطر.
+- [GREEN|YELLOW|RED] | التعويض: شرح المخاطر + توصية.
+- [GREEN|YELLOW|RED] | الملكية الفكرية: شرح المخاطر + توصية.
+- [GREEN|YELLOW|RED] | الإنهاء: شرح المخاطر + توصية.
+=== نهاية التقييم ===
+`}
 
-Do not write anything after === END RISK ===.
+Do not write anything after ${message && /^[a-zA-Z]/.test(message) ? `=== END RISK ===` : `=== نهاية التقييم ===`}.
 
 ============== UI SAFETY RULES — ABSOLUTELY FORBIDDEN ==============
 The UI already renders Copy/Download buttons. NEVER output:
@@ -263,4 +272,4 @@ The UI already renders Copy/Download buttons. NEVER output:
     console.error(error);
     return res.status(500).json({ reply: "حدث خطأ غير متوقع. حاول مرة أخرى." });
   }
-}
+        }
