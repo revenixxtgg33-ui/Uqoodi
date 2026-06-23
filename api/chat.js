@@ -1,26 +1,94 @@
-// api/chat.js — Uqoodi AI contract assistant backend
-// Fixed: language detection is based on the CURRENT user message and strictly locked.
+// api/chat.js — Uqoodi AI contract assistant backend (Vercel + Groq version)
+// Fixed: Language detection based on CURRENT user message.
 
-const express = require("express");
-const pdfParse = require("pdf-parse");
+import pdfParse from 'pdf-parse';
 
-const router = express.Router();
+const MIN_PDF_TEXT_CHARS = 50;
+const MAX_PDF_TEXT_CHARS = 12000;
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-const API_KEY = process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY || "";
-const API_URL = process.env.AI_API_URL || "https://api.openai.com/v1/chat/completions";
-const MODEL = process.env.AI_MODEL || "gpt-4o-mini";
+function cleanBase64(input = "") {
+  let b64 = String(input || "");
+  if (b64.startsWith("data:")) {
+    const i = b64.indexOf(",");
+    if (i >= 0) b64 = b64.substring(i + 1);
+  }
+  return b64.replace(/\s/g, "");
+}
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+function normalizePdfText(text = "") {
+  return String(text || "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
-/**
- * Detect the dominant script of the current user message.
- * Returns "ar" if Arabic letters are >= Latin letters, otherwise "en".
- */
+async function extractWithGeminiOcr(pdfBase64) {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (!apiKey) return "";
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { text: "Extract all readable contract text from this PDF. Return only the extracted text, preserving Arabic and English as accurately as possible." },
+              { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }
+            ]
+          }
+        ],
+        generationConfig: { temperature: 0 }
+      })
+    }
+  );
+
+  const result = await response.json();
+  if (!response.ok) {
+    console.error("Gemini OCR error:", result);
+    return "";
+  }
+
+  return normalizePdfText(result?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("\n") || "");
+}
+
+async function extractPdfText(file) {
+  const clientText = normalizePdfText(file?.text || file?.extractedText || "");
+  if (clientText.length >= MIN_PDF_TEXT_CHARS) {
+    return { text: clientText.substring(0, MAX_PDF_TEXT_CHARS), reason: "browser" };
+  }
+
+  const b64 = cleanBase64(file?.base64 || file?.buffer || file?.data || "");
+  if (!b64) return { text: "", reason: "missing_base64" };
+
+  let nativeText = "";
+  try {
+    const pdfBuffer = Buffer.from(b64, "base64");
+    const pdfData = await pdfParse(pdfBuffer);
+    nativeText = normalizePdfText(pdfData.text || "");
+  } catch (pdfError) {
+    console.error("pdf-parse error:", pdfError);
+  }
+
+  if (nativeText.length >= MIN_PDF_TEXT_CHARS) {
+    return { text: nativeText.substring(0, MAX_PDF_TEXT_CHARS), reason: "native" };
+  }
+
+  try {
+    const ocrText = await extractWithGeminiOcr(b64);
+    if (ocrText.length >= MIN_PDF_TEXT_CHARS) {
+      return { text: ocrText.substring(0, MAX_PDF_TEXT_CHARS), reason: "ocr" };
+    }
+  } catch (ocrError) {
+    console.error("OCR fallback error:", ocrError);
+  }
+
+  return { text: nativeText.substring(0, MAX_PDF_TEXT_CHARS), reason: "empty" };
+}
+
+// Detect language based on current user message
 function detectLanguage(text) {
   if (!text || typeof text !== "string") return "ar";
   const arabic = (text.match(/[\u0600-\u06FF]/g) || []).length;
@@ -28,250 +96,156 @@ function detectLanguage(text) {
   return arabic >= latin ? "ar" : "en";
 }
 
-function isArabic(text) {
-  return detectLanguage(text) === "ar";
-}
-
-function sanitizeReply(reply, lang) {
-  let clean = (reply || "").trim();
-
-  // Remove any stray "copy / download" lines the model might emit.
-  clean = clean
-    .replace(/^[ \t]*[-•*]?[ \t]*(?:\*\*)?(?:نسخ(?:\s+العقد)?|تحميل(?:\s+(?:PDF|الملف|العقد))?|تنزيل|Copy(?:\s+contract)?|Download(?:\s+PDF)?)(?:\*\*)?[ \t]*[:：]?[ \t]*$/gim, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-  // If English was requested, aggressively strip isolated Arabic words/lines.
-  if (lang === "en") {
-    clean = clean
-      .replace(/^[\u0600-\u06FF][^\n]{0,60}[.؟!]?$/gim, "")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-  }
-
-  // If Arabic was requested, aggressively strip isolated English words/lines.
-  if (lang === "ar") {
-    clean = clean
-      .replace(/^[A-Za-z][^\n]{0,60}[.?!]?$/gim, "")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-  }
-
-  return clean;
-}
-
-async function extractPdfText(base64) {
-  try {
-    const buffer = Buffer.from(base64, "base64");
-    if (!buffer || buffer.length === 0) return { text: "", reason: "empty" };
-
-    let nativeText = "";
-    try {
-      const parsed = await pdfParse(buffer);
-      nativeText = (parsed.text || "").trim();
-    } catch (e) {
-      nativeText = "";
-    }
-
-    // If native text is reasonably present, use it.
-    if (nativeText && nativeText.length > 30) {
-      return { text: nativeText.substring(0, 12000), reason: "native" };
-    }
-
-    // OCR fallback is not implemented server-side in this file.
-    // The browser already sends `file.text` from pdf.js extraction.
-    return { text: "", reason: "corrupted" };
-  } catch (error) {
-    return { text: "", reason: "corrupted" };
-  }
-}
-
 function buildSystemPrompt(lang) {
-  const arInstructions = [
-    "أنت عقودي AI، مساعد قانوني ذكي متخصص في صياغة العقود والوثائق التجارية باللغة العربية الفصحى.",
-    "قواعد لغوية صارمة:",
-    "- يجب أن يكون كل ردك باللغة العربية الفصحى فقط.",
-    "- ممنوع تماماً استخدام أي حرف لاتيني أو كلمة إنجليزية في الرد، ما عدا: GREEN و YELLOW و RED عند تقييم المخاطر.",
-    "- إذا كان طلب المستخدم بالإنجليزي، صاغ الرد بالعربية (لأن الواجهة العربية هي الافتراضية) — لا ترد بالإنجليزي أبداً.",
-    "- لا تكتب أي عبارة مثل 'باللغة الإنجليزية' أو 'in English'.",
-    "- لا تضع أزراراً أو روابط أو عبارات مثل 'نسخ العقد' أو 'تحميل PDF'؛ الواجهة توفر ذلك.",
-    "- استخدم أسلوباً احترافياً ومهذباً، بدون تعابير عامية أو emojis زائدة.",
-    "- عند صياغة العقد، استخدم تنسيقاً واضحاً: عنوان، مقدمة، بنود مرقمة، توقيعات.",
-    "- بعد العقد، أضف دائماً قسم تحليل المخاطر بالتنسيق المطلوب:",
-    "=== RISK ASSESSMENT ===",
-    "OVERALL: [GREEN|YELLOW|RED] — جملة موجزة بالعربية.",
-    "- [GREEN|YELLOW|RED] | البند رقم X (اسم البند): شرح موجز وتوصية.",
-    "- [GREEN|YELLOW|RED] | البند رقم Y (اسم البند): شرح موجز وتوصية.",
-    "- [GREEN|YELLOW|RED] | البند رقم Z (اسم البند): شرح موجز وتوصية.",
-    "=== END RISK ===",
-    "- لا تضف أي نص بعد === END RISK ===.",
-  ];
+  if (lang === "en") {
+    return `You are Uqoodi AI, a smart legal assistant specialized in drafting contracts and commercial documents in professional English.
 
-  const enInstructions = [
-    "You are Uqoodi AI, a smart legal assistant specialized in drafting contracts and commercial documents in professional English.",
-    "Strict language rules:",
-    "- Your entire reply MUST be in English only.",
-    "- Do NOT use any Arabic letters or words, except the literal Arabic contract text if the user explicitly asks for an Arabic clause.",
-    "- If the user's message is in Arabic but the interface language is English, reply in English.",
-    "- Do not include phrases like 'in Arabic' or 'بالعربية'.",
-    "- Do not include buttons, links, or phrases like 'Copy contract' or 'Download PDF'; the UI provides those.",
-    "- Use a professional, polite tone with no slang or excessive emojis.",
-    "- When drafting a contract, use a clear format: title, introduction, numbered clauses, signatures.",
-    "- After the contract, always append the risk assessment section in this exact format:",
-    "=== RISK ASSESSMENT ===",
-    "OVERALL: [GREEN|YELLOW|RED] — one short sentence.",
-    "- [GREEN|YELLOW|RED] | Clause X (clause name): brief risk explanation and recommendation.",
-    "- [GREEN|YELLOW|RED] | Clause Y (clause name): brief risk explanation and recommendation.",
-    "- [GREEN|YELLOW|RED] | Clause Z (clause name): brief risk explanation and recommendation.",
-    "=== END RISK ===",
-    "- Do not write anything after === END RISK ===.",
-  ];
-
-  return {
-    role: "system",
-    content: (lang === "ar" ? arInstructions : enInstructions).join("\n"),
-  };
-}
-
-function userLanguageReminder(lang) {
-  if (lang === "ar") {
-    return "\n\nتذكير: ردّ بالعربية الفصحى فقط. ممنوع أي نص إنجليزي إلا GREEN/YELLOW/RED.";
+Strict language rules:
+- Your entire reply MUST be in English only.
+- Do NOT use any Arabic letters or words, except the literal Arabic contract text if the user explicitly asks for an Arabic clause.
+- Do not include buttons, links, or phrases like 'Copy contract' or 'Download PDF'; the UI provides those.
+- Use a professional, polite tone with no slang or excessive emojis.
+- When drafting a contract, use a clear format: title, introduction, numbered clauses, signatures.
+- After the contract, always append the risk assessment section in this exact format:
+=== RISK ASSESSMENT ===
+OVERALL: [GREEN|YELLOW|RED] — one short sentence.
+- [GREEN|YELLOW|RED] | Clause X (clause name): brief risk explanation and recommendation.
+- [GREEN|YELLOW|RED] | Clause Y (clause name): brief risk explanation and recommendation.
+- [GREEN|YELLOW|RED] | Clause Z (clause name): brief risk explanation and recommendation.
+=== END RISK ===
+- Do not write anything after === END RISK ===.`;
   }
-  return "\n\nReminder: reply in English only. No Arabic text except literal Arabic clauses if requested.";
+
+  return `أنت عقودي AI، مساعد قانوني ذكي متخصص في صياغة العقود والوثائق التجارية باللغة العربية الفصحى.
+
+قواعد لغوية صارمة:
+- يجب أن يكون كل ردك باللغة العربية الفصحى فقط.
+- ممنوع تماماً استخدام أي حرف لاتيني أو كلمة إنجليزية في الرد، ما عدا: GREEN و YELLOW و RED عند تقييم المخاطر.
+- لا تكتب أي عبارة مثل 'باللغة الإنجليزية' أو 'in English'.
+- لا تضع أزراراً أو روابط أو عبارات مثل 'نسخ العقد' أو 'تحميل PDF'؛ الواجهة توفر ذلك.
+- استخدم أسلوباً احترافياً ومهذباً، بدون تعابير عامية أو emojis زائدة.
+- عند صياغة العقد، استخدم تنسيقاً واضحاً: عنوان، مقدمة، بنود مرقمة، توقيعات.
+- بعد العقد، أضف دائماً قسم تحليل المخاطر بالتنسيق المطلوب:
+=== RISK ASSESSMENT ===
+OVERALL: [GREEN|YELLOW|RED] — جملة موجزة بالعربية.
+- [GREEN|YELLOW|RED] | البند رقم X (اسم البند): شرح موجز وتوصية.
+- [GREEN|YELLOW|RED] | البند رقم Y (اسم البند): شرح موجز وتوصية.
+- [GREEN|YELLOW|RED] | البند رقم Z (اسم البند): شرح موجز وتوصية.
+=== END RISK ===
+- لا تضف أي نص بعد === END RISK ===.`;
 }
 
-// ---------------------------------------------------------------------------
-// Main handler
-// ---------------------------------------------------------------------------
-router.post("/", async (req, res) => {
-  try {
-    const { messages, message, file, lang: clientLang } = req.body || {};
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-    // Determine language from the CURRENT user message, not history.
-    const currentUserText = (message || "").toString();
-    const detectedLang = detectLanguage(currentUserText);
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  try {
+    const body =
+      typeof req.body === "string"
+        ? JSON.parse(req.body)
+        : req.body;
+
+    const incomingMessages = Array.isArray(body?.messages) ? body.messages : null;
+    const currentUserMsg = body?.message?.trim() || "";
+    const file = body?.file || null;
+
+    // Detect language from current user message
+    const detectedLang = detectLanguage(currentUserMsg);
     const isEnglish = detectedLang === "en";
 
-    // -----------------------------------------------------------------------
-    // File handling
-    // -----------------------------------------------------------------------
-    let fileContext = "";
-    if (file && file.base64) {
-      const extraction = await extractPdfText(file.base64);
+    // Build the final message with file context if present
+    let finalMessage = currentUserMsg;
 
-      if (extraction.reason === "empty") {
-        return res.status(400).json({
-          reply: isEnglish
-            ? "The uploaded PDF appears to be empty. Please upload a valid file."
-            : "يبدو أن ملف PDF فارغ. يرجى رفع ملف صالح.",
-        });
-      }
-
-      if (extraction.reason === "corrupted") {
-        // Use browser-extracted text as fallback if provided.
-        const browserText = file.text || "";
-        if (browserText.length > 30) {
-          fileContext = isEnglish
-            ? `\n\n[Extracted file text from ${file.name}]:\n${browserText.substring(0, 12000)}`
-            : `\n\n[نص مستخرج من الملف ${file.name}]:\n${browserText.substring(0, 12000)}`;
+    if (file) {
+      if (file.type && file.type.startsWith("image/")) {
+        finalMessage = `[User uploaded an image with the question]. Since you are a text-only model, please ignore the image and answer only the question: ${currentUserMsg}`;
+      } else if (file.type === "application/pdf" || /\.pdf$/i.test(file.name || "")) {
+        const extracted = await extractPdfText(file);
+        if (extracted.reason === "missing_base64") {
+          finalMessage = `[User uploaded a PDF but the content didn't arrive]. Question: ${currentUserMsg}`;
+        } else if (!extracted.text) {
+          finalMessage = `[PDF uploaded but no text was extracted even after OCR]. Question: ${currentUserMsg}`;
         } else {
-          return res.status(400).json({
-            reply: isEnglish
-              ? "Could not read the PDF. It may be corrupted or scanned. Please try another file."
-              : "تعذّر قراءة ملف PDF. قد يكون تالفاً أو ممسوحاً ضوئياً. جرّب ملفاً آخر.",
-          });
+          const readMethod = extracted.reason === "ocr" ? "OCR" : (extracted.reason === "browser" ? "Browser" : "Native");
+          finalMessage = `[PDF uploaded — file: ${file.name || "document.pdf"} — method: ${readMethod}]. Extracted text:\n\n"""${extracted.text}"""\n\nUse the text above in your answer.\nUser question: ${currentUserMsg || "Please analyze this contract."}`;
         }
-      } else {
-        fileContext = isEnglish
-          ? `\n\n[Extracted file text from ${file.name}]:\n${extraction.text}`
-          : `\n\n[نص مستخرج من الملف ${file.name}]:\n${extraction.text}`;
       }
     }
 
-    // -----------------------------------------------------------------------
-    // Build messages
-    // -----------------------------------------------------------------------
-    const systemPrompt = buildSystemPrompt(detectedLang);
-
-    let incomingMessages = Array.isArray(messages) ? messages : [];
-
-    // Filter history to valid role/content pairs and append file context to the last user message.
-    const history = incomingMessages
-      .filter((m) => m && typeof m.content === "string" && ["user", "assistant", "system"].includes(m.role))
-      .map((m) => ({ role: m.role, content: m.content }));
-
-    // The last message should be the current user message; attach file context there.
-    if (history.length > 0 && history[history.length - 1].role === "user") {
-      history[history.length - 1].content += fileContext;
-      history[history.length - 1].content += userLanguageReminder(detectedLang);
-    } else if (currentUserText) {
-      history.push({
-        role: "user",
-        content: currentUserText + fileContext + userLanguageReminder(detectedLang),
-      });
+    if (!finalMessage) {
+      return res.status(400).json({ reply: "Please write a message first." });
     }
 
-    const finalMessages = [systemPrompt, ...history];
+    // Build conversation
+    const systemPrompt = { role: "system", content: buildSystemPrompt(detectedLang) };
 
-    // -----------------------------------------------------------------------
-    // AI call
-    // -----------------------------------------------------------------------
-    if (!API_KEY) {
-      return res.status(500).json({
-        reply: isEnglish
-          ? "AI service is not configured. Please contact support."
-          : "خدمة الذكاء الاصطناعي غير مُعدّة. يرجى التواصل مع الدعم.",
-      });
+    let convo = [];
+    if (incomingMessages && incomingMessages.length) {
+      convo = incomingMessages
+        .filter(m => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+        .map(m => ({ role: m.role, content: m.content }));
     }
 
-    const aiRes = await fetch(API_URL, {
+    // Replace last user message with finalMessage (with file context)
+    if (convo.length && convo[convo.length - 1].role === "user") {
+      convo[convo.length - 1] = { role: "user", content: finalMessage };
+    } else {
+      convo.push({ role: "user", content: finalMessage });
+    }
+
+    // Keep only last 20 turns
+    if (convo.length > 20) convo = convo.slice(-20);
+
+    // Call Groq
+    const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: MODEL,
-        messages: finalMessages,
+        model: "llama-3.3-70b-versatile",
         temperature: 0.25,
         max_tokens: 2500,
-      }),
+        messages: [systemPrompt, ...convo]
+      })
     });
 
-    if (!aiRes.ok) {
-      const status = aiRes.status;
-      const text = await aiRes.text();
-      console.error("AI API error:", status, text);
+    const result = await groqResponse.json();
+
+    if (!groqResponse.ok) {
+      console.error("Groq API error:", result);
       return res.status(200).json({
         reply: isEnglish
-          ? "An error occurred while contacting the AI model. Please try again in a moment."
-          : "حدث خطأ أثناء التواصل مع نموذج الذكاء الاصطناعي. حاول مرة أخرى بعد قليل.",
+          ? "An error occurred while contacting the AI model. Please try again."
+          : "حدث خطأ أثناء التواصل مع نموذج الذكاء الاصطناعي. حاول مرة أخرى."
       });
     }
 
-    const aiData = await aiRes.json();
-    let reply = aiData.choices?.[0]?.message?.content || "";
+    let reply = result?.choices?.[0]?.message?.content || "";
 
     if (!reply) {
       return res.status(200).json({
-        reply: isEnglish
-          ? "Sorry, I couldn't generate a reply."
-          : "عذراً، لم أتمكن من توليد رد.",
+        reply: isEnglish ? "Sorry, I couldn't generate a reply." : "عذراً، لم أتمكن من توليد رد."
       });
     }
 
-    reply = sanitizeReply(reply, detectedLang);
+    // Clean up any stray copy/download lines
+    reply = reply
+      .replace(/^[ \t]*[-•*]?[ \t]*(?:\*\*)?(?:نسخ(?:\s+العقد)?|تحميل(?:\s+(?:PDF|الملف|العقد))?|تنزيل|Copy(?:\s+contract)?|Download(?:\s+PDF)?)(?:\*\*)?[ \t]*[:：]?[ \t]*$/gim, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
 
     return res.status(200).json({ reply });
+
   } catch (error) {
     console.error("Chat endpoint error:", error);
-    const fallbackLang = req.body && req.body.lang === "en" ? "en" : "ar";
     return res.status(500).json({
-      reply: fallbackLang === "en"
-        ? "An unexpected error occurred. Please try again."
-        : "حدث خطأ غير متوقع. حاول مرة أخرى.",
+      reply: "An unexpected error occurred. Please try again."
     });
   }
-});
-
-module.exports = router;
+    }
