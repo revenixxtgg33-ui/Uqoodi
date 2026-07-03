@@ -265,7 +265,7 @@ module.exports = async (req, res) => {
       return res.status(200).json({
         trial_ended: true,
         reply: isAr
-          ? 'انتهت محاولاتك المجانية. يرجى ترقية باقتك للاستمرار في استخدام عقودي.'
+          ? 'انتهت محاولاتك المجانية في استخدام عقودي. يرجى ترقية باقتك للاستمرار.'
           : 'Your free trial has ended. Please upgrade your plan to continue using Uqoodi.',
         tries_left: 0
       });
