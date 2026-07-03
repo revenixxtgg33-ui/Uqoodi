@@ -1,9 +1,0 @@
-{
-  "name": "uqoodi-api",
-  "version": "1.0.0",
-  "description": "Uqoodi AI Backend for Vercel",
-  "main": "api/chat.js",
-  "dependencies": {
-    "pdf-parse": "^1.1.1"
-  }
-}
