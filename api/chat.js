@@ -1,40 +1,22 @@
-// api/chat.js — Fixed Token Limit (Truncates history & system prompt)
+// api/chat.js — Final Fix (Uses Gemini as Primary, Truncates aggressively)
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GROQ_API_KEY   = process.env.GROQ_API_KEY;
 
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://jfhoioozzklxvrncjlhk.supabase.co';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'sb_publishable_bcPvrDmn0Eboc3sB2o3mCA_bX7vB5Re';
 
-// ---- SYSTEM PROMPT (Shortened to save tokens) ----
+// ---- Extremely Short System Prompt ----
 const SYSTEM_PROMPT = `
-You are Uqoodi AI. Draft contracts/proposals/quotations in Arabic/English.
-If user sends PDF or contract text:
-1. Draft the document.
-2. Append:
-   === RISK ASSESSMENT === [GREEN|YELLOW|RED] clauses.
-   === CONTRACT SCORE === Overall NN/100, Grade, Safety, Fairness, Payment, Delay.
-   === GCC COMPLIANCE === SA, UAE, KW, QA with [GREEN|YELLOW|RED].
-If user greets you, reply friendly and short.
+You are Uqoodi AI. Draft contracts/quotes in Arabic/English.
+If PDF/contract text provided: draft document + RISK ASSESSMENT, CONTRACT SCORE, GCC COMPLIANCE.
+If greeting: reply warmly and short.
 `.trim();
 
-function pickModel() { if (GEMINI_API_KEY) return 'gemini'; if (GROQ_API_KEY) return 'groq'; return null; }
-
-async function callGroq(messages) {
-  // ✅ أرسل فقط آخر 6 رسائل (أكثر من كافٍ للسياق)
-  const trimmedMessages = messages.slice(-6);
-  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0.6,
-      max_tokens: 4096,
-      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...trimmedMessages]
-    })
-  });
-  if (!r.ok) throw new Error(`Groq ${r.status}: ${await r.text()}`);
-  const j = await r.json();
-  return (j?.choices?.[0]?.message?.content || '').trim();
+function pickModel() {
+  // Gemini has higher limits, prioritize it
+  if (GEMINI_API_KEY) return 'gemini';
+  if (GROQ_API_KEY)   return 'groq';
+  return null;
 }
 
 async function callGemini(messages) {
@@ -48,15 +30,28 @@ async function callGemini(messages) {
   return (j?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '').trim();
 }
 
+async function callGroq(messages) {
+  // Send only last 3 messages to save tokens
+  const trimmedMessages = messages.slice(-3);
+  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
+    body: JSON.stringify({ model: 'llama-3.3-70b-versatile', temperature: 0.6, max_tokens: 4096, messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...trimmedMessages] })
+  });
+  if (!r.ok) throw new Error(`Groq ${r.status}: ${await r.text()}`);
+  const j = await r.json();
+  return (j?.choices?.[0]?.message?.content || '').trim();
+}
+
+// ---- PDF extraction (aggressive truncation) ----
 async function extractPdfText(base64) {
   if (!base64) return '';
   try {
     const pdfParse = require('pdf-parse');
     const out = await pdfParse(Buffer.from(base64, 'base64'));
     let text = (out && out.text ? String(out.text) : '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-    if (text.length > 1500) {
-      text = text.substring(0, 1500) + "\n\n[تم اختصار النص بسبب الحجم]";
-    }
+    // Cut to 300 chars to be absolutely safe for free tier
+    if (text.length > 300) text = text.substring(0, 300) + " [Text truncated due to length]";
     return text;
   } catch (e) { return ''; }
 }
@@ -101,37 +96,50 @@ module.exports = async (req, res) => {
       return res.status(200).json({ trial_ended: true, reply: 'انتهت محاولاتك المجانية.', tries_left: 0 });
     }
 
-    // ---- PDF handling ----
+    // ---- PDF handling (cut to 300 chars) ----
     if (file && file.type === 'application/pdf') {
       let pdfText = (file.text && String(file.text).trim()) || '';
       if (!pdfText && file.base64) pdfText = await extractPdfText(file.base64);
       if (pdfText) {
-        const marker = `\n\n[PDF Content]\n"""${pdfText}"""`;
-        if (msgs.length) msgs[msgs.length-1].content += marker;
+        if (msgs.length) msgs[msgs.length-1].content += `\n\n[PDF Content (summary)]\n"""${pdfText}"""`;
       }
     }
 
-    // ---- Final safety check: ensure total request length < 15000 chars ----
+    // ---- Safety: reduce overall length to under 6000 chars (safe for Groq) ----
     let totalLen = msgs.reduce((sum, m) => sum + (m.content || '').length, 0);
-    if (totalLen > 15000) {
+    if (totalLen > 6000) {
       for (let i = msgs.length - 1; i >= 0; i--) {
         if (msgs[i].role === 'user') {
-          msgs[i].content = msgs[i].content.substring(0, 8000) + "\n\n[Text truncated due to size]";
+          msgs[i].content = msgs[i].content.substring(0, 2500) + "\n\n[Text truncated due to size]";
           break;
         }
       }
     }
 
     const provider = pickModel();
-    if (!provider) return res.status(500).json({ error: 'API Key missing' });
+    if (!provider) return res.status(500).json({ error: 'No AI provider configured' });
 
-    let reply = provider === 'gemini' ? await callGemini(msgs) : await callGroq(msgs);
+    let reply, lastError = null;
+    try {
+      reply = provider === 'gemini' ? await callGemini(msgs) : await callGroq(msgs);
+    } catch (e) {
+      lastError = e;
+      // Fallback to Groq if Gemini fails and Groq exists
+      if (provider === 'gemini' && GROQ_API_KEY) {
+        try { reply = await callGroq(msgs); } catch (e2) { lastError = e2; }
+      }
+      if (!reply) {
+        console.error('[api/chat] both models failed:', lastError?.message);
+        return res.status(200).json({ error: String(lastError?.message || 'Unknown AI error') });
+      }
+    }
+
     let triesLeft = profile?.triesLeft;
     if (profile && sbUser && isFreePlan) triesLeft = await decrementTries(sbUser.id, profile.triesLeft, token);
 
     return res.status(200).json({ reply, tries_left: triesLeft });
   } catch (err) {
-    console.error('[api/chat] error:', err);
+    console.error('[api/chat] unexpected error:', err);
     return res.status(200).json({ error: String(err.message) });
   }
 };
