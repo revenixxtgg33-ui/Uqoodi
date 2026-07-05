@@ -147,11 +147,15 @@ async function extractPdfText(base64) {
     const pdfParse = require('pdf-parse');
     const buf = Buffer.from(base64, 'base64');
     const out = await pdfParse(buf);
-    return (out && out.text ? String(out.text) : '')
+    // --- تعديل: تقليل حجم النص إلى 4000 حرف لتجنب خطأ Groq 413 ---
+    let text = (out && out.text ? String(out.text) : '')
       .replace(/[ \t]+/g, ' ')
       .replace(/\n{3,}/g, '\n\n')
-      .trim()
-      .substring(0, 12000);
+      .trim();
+    if (text.length > 4000) {
+      text = text.substring(0, 4000) + "\n\n[ملاحظة: تم اختصار نص الملف بسبب حجمه الكبير، يرجى مراجعة الملف الأصلي للتفاصيل الكاملة]";
+    }
+    return text;
   } catch (e) {
     console.error('[extractPdfText] failed:', e && e.message);
     return '';
