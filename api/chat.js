@@ -1,5 +1,5 @@
 // api/chat.js — Uqoodi chat endpoint (Vercel serverless function)
-// Version with explicit error reporting and fallback handling
+// Fix: Token limit for Groq (413)
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GROQ_API_KEY   = process.env.GROQ_API_KEY;
@@ -7,7 +7,6 @@ const GROQ_API_KEY   = process.env.GROQ_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://jfhoioozzklxvrncjlhk.supabase.co';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_bcPvrDmn0Eboc3sB2o3mCA_bX7vB5Re';
 
-// ---------- System prompt (unchanged) ----------
 const SYSTEM_PROMPT = `
 You are "Uqoodi" (عقودي) — a professional bilingual (Arabic / English) assistant
 for freelancers, SMBs and agencies in the GCC (SA, UAE, KW, QA, OM, BH).
@@ -137,8 +136,9 @@ async function extractPdfText(base64) {
       .replace(/[ \t]+/g, ' ')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
-    if (text.length > 4000) {
-      text = text.substring(0, 4000) + "\n\n[ملاحظة: تم اختصار نص الملف بسبب حجمه الكبير، يرجى مراجعة الملف الأصلي للتفاصيل الكاملة]";
+    // تقليل حجم النص إلى 2000 حرف لتجنب تجاوز حد 12000 Token
+    if (text.length > 2000) {
+      text = text.substring(0, 2000) + "\n\n[ملاحظة: تم اختصار نص الملف بسبب حجمه الكبير، يرجى مراجعة الملف الأصلي للتفاصيل الكاملة]";
     }
     return text;
   } catch (e) {
@@ -288,13 +288,34 @@ module.exports = async (req, res) => {
       return res.status(500).json({ error: 'No AI provider configured. Please set GEMINI_API_KEY or GROQ_API_KEY.' });
     }
 
+    // ---- 4) تقليل حجم النص العام لإرساله إلى الذكاء الاصطناعي ----
+    // نقوم بجمع كل المحتوى النصي من جميع الرسائل وإذا تجاوز الطول 20000 حرف نقوم باقتطاعه
+    // 20000 حرف تعادل تقريباً 5000-7000 Token، وهو تحت حد 12000 Token.
+    let totalLength = 0;
+    for (let i = 0; i < msgs.length; i++) {
+      const content = msgs[i].content || '';
+      totalLength += content.length;
+    }
+    // إذا كان النص الكلي طويلاً جداً، اقتطاع آخر رسالة
+    if (totalLength > 20000) {
+      // اقتطاع آخر رسالة من المستخدم
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === 'user') {
+          if (msgs[i].content.length > 10000) {
+            msgs[i].content = msgs[i].content.substring(0, 10000) + "\n\n[تم اختصار النص بسبب طوله الكبير]";
+          }
+          break;
+        }
+      }
+    }
+
+    // ---- 5) Call the model ----
     let reply;
     let lastError = null;
     try {
       reply = provider === 'gemini' ? await callGemini(msgs) : await callGroq(msgs);
     } catch (e) {
       lastError = e;
-      // If Gemini fails and Groq is available, try fallback
       if (provider === 'gemini' && GROQ_API_KEY) {
         try {
           reply = await callGroq(msgs);
@@ -303,15 +324,15 @@ module.exports = async (req, res) => {
         }
       }
       if (!reply) {
-        // Both failed or fallback not available
         console.error('[api/chat] both models failed:', lastError && lastError.message);
-        return res.status(500).json({ 
-          error: lastError ? lastError.message : 'Unknown error from AI provider' 
+        // إرجاع الخطأ الحقيقي للواجهة الأمامية
+        return res.status(500).json({
+          error: lastError ? lastError.message : 'Unknown error from AI provider'
         });
       }
     }
 
-    // ---- 4) Decrement tries ----
+    // ---- 6) Decrement tries ----
     let triesLeft = profile ? profile.triesLeft : undefined;
     if (profile && sbUser && isFreePlan) {
       try {
