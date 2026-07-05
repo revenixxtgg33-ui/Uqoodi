@@ -1,30 +1,11 @@
 // api/chat.js — Uqoodi chat endpoint (Vercel serverless function)
-//
-// Fixes in this version (surgical, nothing else changed):
-//  1) Free-trial enforcement — server checks `tries_left` in Supabase `profiles`
-//     BEFORE calling the model, and decrements it AFTER a successful reply.
-//     If tries_left <= 0 → returns a "Trial ended" message (HTTP 200 with
-//     `trial_ended:true` so the frontend can show the upgrade card).
-//  2) PDF reading — if the client uploads a PDF (payload.file), we now:
-//        a) use its client-extracted text when present, OR
-//        b) run `pdf-parse` on the server as a fallback,
-//     and inject the extracted text into the user message so the AI actually
-//     sees the contract content (fixes "No text extracted").
-//  3) No change to Groq / Gemini / Vercel / Supabase env vars or UI.
+// Version with explicit error reporting and fallback handling
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GROQ_API_KEY   = process.env.GROQ_API_KEY;
 
-// Supabase — use existing publishable creds already used by the frontend.
-// (No new env vars introduced. If you already have SUPABASE_URL /
-//  SUPABASE_ANON_KEY / SUPABASE_PUBLISHABLE_KEY set on Vercel, they win.)
-const SUPABASE_URL =
-  process.env.SUPABASE_URL ||
-  'https://jfhoioozzklxvrncjlhk.supabase.co';
-const SUPABASE_ANON_KEY =
-  process.env.SUPABASE_ANON_KEY ||
-  process.env.SUPABASE_PUBLISHABLE_KEY ||
-  'sb_publishable_bcPvrDmn0Eboc3sB2o3mCA_bX7vB5Re';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://jfhoioozzklxvrncjlhk.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_bcPvrDmn0Eboc3sB2o3mCA_bX7vB5Re';
 
 // ---------- System prompt (unchanged) ----------
 const SYSTEM_PROMPT = `
@@ -114,7 +95,10 @@ async function callGemini(messages) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
-  if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
+  if (!r.ok) {
+    const errorBody = await r.text();
+    throw new Error(`Gemini ${r.status}: ${errorBody}`);
+  }
   const j = await r.json();
   const text = j?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
   return text.trim();
@@ -134,7 +118,10 @@ async function callGroq(messages) {
       messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages]
     })
   });
-  if (!r.ok) throw new Error(`Groq ${r.status}: ${await r.text()}`);
+  if (!r.ok) {
+    const errorBody = await r.text();
+    throw new Error(`Groq ${r.status}: ${errorBody}`);
+  }
   const j = await r.json();
   return (j?.choices?.[0]?.message?.content || '').trim();
 }
@@ -143,11 +130,9 @@ async function callGroq(messages) {
 async function extractPdfText(base64) {
   if (!base64) return '';
   try {
-    // Lazy-load so cold-starts stay cheap when no PDF is uploaded.
     const pdfParse = require('pdf-parse');
     const buf = Buffer.from(base64, 'base64');
     const out = await pdfParse(buf);
-    // --- تعديل: تقليل حجم النص إلى 4000 حرف لتجنب خطأ Groq 413 ---
     let text = (out && out.text ? String(out.text) : '')
       .replace(/[ \t]+/g, ' ')
       .replace(/\n{3,}/g, '\n\n')
@@ -228,24 +213,21 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(204).end();
-  if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
     const { messages = [], message, file, lang } = req.body || {};
     const msgs = Array.isArray(messages) && messages.length
-      ? messages.map(m => ({ ...m }))               // shallow clone so we can edit
+      ? messages.map(m => ({ ...m }))
       : (message ? [{ role: 'user', content: String(message) }] : []);
 
     if (!msgs.length && !file) {
       return res.status(400).json({ error: 'No message provided' });
     }
 
-    // ---- 1) Trial enforcement (server-side, authoritative) ----
-    // Read bearer token from Authorization header (added by frontend).
+    // ---- 1) Trial enforcement ----
     const authHeader = req.headers['authorization'] || req.headers['Authorization'] || '';
-    const token = authHeader.startsWith('Bearer ')
-      ? authHeader.slice(7).trim()
-      : '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
 
     let profile = null;
     let sbUser = null;
@@ -260,10 +242,7 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Only enforce for free plan (or when plan missing). Paid plans bypass.
-    const isFreePlan = !profile || !profile.plan ||
-      /مجانية|free/i.test(profile.plan);
-
+    const isFreePlan = !profile || !profile.plan || /مجانية|free/i.test(profile.plan);
     if (profile && isFreePlan && profile.triesLeft <= 0) {
       const isAr = (lang || 'ar') === 'ar';
       return res.status(200).json({
@@ -275,7 +254,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    // ---- 2) PDF handling — inject extracted text into the user message ----
+    // ---- 2) PDF handling ----
     if (file && file.type === 'application/pdf') {
       let pdfText = (file.text && String(file.text).trim()) || '';
       if (!pdfText && file.base64) {
@@ -283,19 +262,16 @@ module.exports = async (req, res) => {
       }
       if (pdfText) {
         const marker = `\n\n[Attached PDF: ${file.name || 'document.pdf'}]\n"""\n${pdfText}\n"""\n`;
-        // Append to the LAST user message so the model actually sees it.
         for (let i = msgs.length - 1; i >= 0; i--) {
           if (msgs[i].role === 'user') {
             msgs[i].content = (msgs[i].content || '') + marker;
             break;
           }
         }
-        // If there was no user message but a file was attached, create one.
         if (!msgs.some(m => m.role === 'user')) {
           msgs.push({ role: 'user', content: marker });
         }
       } else {
-        // Tell the model we couldn't read it, so it asks the user for the text.
         for (let i = msgs.length - 1; i >= 0; i--) {
           if (msgs[i].role === 'user') {
             msgs[i].content = (msgs[i].content || '') +
@@ -308,20 +284,34 @@ module.exports = async (req, res) => {
 
     // ---- 3) Call the model ----
     const provider = pickModel();
-    if (!provider) return res.status(500).json({ error: 'No AI provider configured' });
+    if (!provider) {
+      return res.status(500).json({ error: 'No AI provider configured. Please set GEMINI_API_KEY or GROQ_API_KEY.' });
+    }
 
     let reply;
+    let lastError = null;
     try {
       reply = provider === 'gemini' ? await callGemini(msgs) : await callGroq(msgs);
     } catch (e) {
+      lastError = e;
+      // If Gemini fails and Groq is available, try fallback
       if (provider === 'gemini' && GROQ_API_KEY) {
-        reply = await callGroq(msgs);
-      } else {
-        throw e;
+        try {
+          reply = await callGroq(msgs);
+        } catch (e2) {
+          lastError = e2;
+        }
+      }
+      if (!reply) {
+        // Both failed or fallback not available
+        console.error('[api/chat] both models failed:', lastError && lastError.message);
+        return res.status(500).json({ 
+          error: lastError ? lastError.message : 'Unknown error from AI provider' 
+        });
       }
     }
 
-    // ---- 4) Decrement tries AFTER successful reply (free plan only) ----
+    // ---- 4) Decrement tries ----
     let triesLeft = profile ? profile.triesLeft : undefined;
     if (profile && sbUser && isFreePlan) {
       try {
@@ -338,7 +328,7 @@ module.exports = async (req, res) => {
       tries_left: triesLeft
     });
   } catch (err) {
-    console.error('[api/chat] error:', err);
+    console.error('[api/chat] unexpected error:', err);
     return res.status(500).json({ error: err.message || 'Internal error' });
   }
 };
