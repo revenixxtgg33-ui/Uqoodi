@@ -1,0 +1,12 @@
+{
+  "buildCommand": null,
+  "outputDirectory": ".",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "functions": {
+    "api/chat.js": {
+      "maxDuration": 10
+    }
+  }
+}
