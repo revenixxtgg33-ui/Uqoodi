@@ -53,6 +53,17 @@ OVERALL: [GREEN|YELLOW|RED] — one short sentence on the overall risk level.
 Never write anything after "=== END GCC ===". Reference actual clauses from the document above.
 If the user's [SYSTEM ...] directive tells you to reply casually or to ask clarifying questions,
 follow it literally and do NOT emit any of the analysis blocks in that reply.
+
+CRITICAL — WHEN IN ANALYSIS/DRAFT MODE (a contract is drafted or a document/PDF is analyzed):
+you MUST emit ALL THREE blocks in this exact order and never omit any of them:
+  1) === CONTRACT SCORE === ... === END SCORE ===   (mandatory, always include the percentage
+     and the three sub-scores Clarity / Enforceability / Balance)
+  2) === RISK ASSESSMENT === ... === END RISK ===   (mandatory)
+  3) === GCC COMPLIANCE === ... === END GCC ===     (mandatory, include Saudi Arabia, UAE,
+     Kuwait, Qatar at minimum, each with a color and short statutory reference)
+If any of these three sections is missing, the reply is invalid. Do not skip SCORE or GCC
+even if the contract is short — infer a reasonable score and reference the most relevant
+GCC labor/commercial law for each country.
 `.trim();
 
 function pickModel() {
