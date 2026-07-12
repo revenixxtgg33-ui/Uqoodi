@@ -1,258 +1,332 @@
-// api/chat.js — Uqoodi AI (Gemini primary, Groq fallback)
-// - Casual message → short conversational reply
-// - Contract / analysis request → full document + CONTRACT SCORE + RISK ASSESSMENT + GCC COMPLIANCE
-// - The frontend already appends a [SYSTEM ...] directive to the user message; we honor it.
-
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GROQ_API_KEY   = process.env.GROQ_API_KEY;
+// api/chat.js — Uqoodi AI (v2)
+// - Round-Robin على مفاتيح Gemini و Groq (GEMINI_API_KEYS, GROQ_API_KEYS مفصولة بفواصل)
+// - Guardrails صارمة (عقود/عروض أسعار فقط، رفض الطقس/البرمجة/العام)
+// - عربية فصحى، بدون "أنا" أو "لقد طلبت مني"، بدون أحرف صينية/أجنبية
+// - رفع PDF: يُلحق نصه بالطلب دون عرضه للمستخدم كرسالة (الواجهة تحذف الـ [SYSTEM] من العرض)
+// - أزرار المميزات: ترسل مباشرة action=red_flags|rephrase|timeline|export_word|sign_pdf
+// - إذا فشلت كل المفاتيح: رسالة واضحة (بدون شاشة سوداء)
 
 const SUPABASE_URL       = process.env.SUPABASE_URL       || 'https://jfhoioozzklxvrncjlhk.supabase.co';
 const SUPABASE_ANON_KEY  = process.env.SUPABASE_ANON_KEY  || 'sb_publishable_bcPvrDmn0Eboc3sB2o3mCA_bX7vB5Re';
 
-// ---- System prompt: dual-mode (chat vs. contract) ----
+// ------- Round-Robin Key Pools -------
+function parseKeys(raw){
+  if(!raw) return [];
+  return String(raw).split(/[,\s]+/).map(s=>s.trim()).filter(Boolean);
+}
+const GEMINI_KEYS = parseKeys(process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY);
+const GROQ_KEYS   = parseKeys(process.env.GROQ_API_KEYS   || process.env.GROQ_API_KEY);
+
+// مؤشرات دوّارة (بحياة الـ instance)
+globalThis.__uq_idx = globalThis.__uq_idx || { gemini: 0, groq: 0 };
+function nextKey(pool, kind){
+  if(!pool.length) return null;
+  const i = globalThis.__uq_idx[kind] % pool.length;
+  globalThis.__uq_idx[kind] = (i + 1) % pool.length;
+  return { key: pool[i], index: i };
+}
+
+// ---- System prompt (v2: guardrails + Arabic-only tone) ----
 const SYSTEM_PROMPT = `
-CRITICAL INSTRUCTION: You are NOT allowed to ask for missing details when the user requests an analysis or a draft. If a field is missing, infer it based on standard GCC market practices and proceed. Always produce the full requested output without asking clarifying questions.
+أنت "عقودي AI" — مساعد SaaS متخصّص فقط في تحليل وإنشاء العقود، الاتفاقيات، عروض الأسعار، الفواتير، ومذكّرات التفاهم للسوق السعودي والخليجي. أنت أداة مساعدة، ولست محامياً مرخّصاً.
 
-You are "Uqoodi AI" (عقودي AI) — a smart assistant tool for drafting and reviewing contracts and business documents for the Saudi Arabian and GCC market. You are NOT a licensed lawyer and you do NOT replace one; you are an assisting/supporting tool. If the user asks whether you replace a lawyer, clarify politely that you are an assistant tool for drafting and reviewing documents, not an official legal representative.
+قواعد صارمة (لا تُخالَف):
+1) النطاق: ممنوع الرد على أي موضوع خارج العقود/الأعمال (الطقس، البرمجة، الرياضة، الطبخ، أخبار عامة، شعر، ألغاز...). عند سؤال خارج النطاق ردّ بجملة واحدة مؤدّبة:
+   "عذراً، أنا مساعد متخصّص في العقود وعروض الأسعار فقط. أخبرني بتفاصيل العقد أو العرض الذي تحتاجه."
+2) اللغة: العربية الفصحى المهنية فقط. ممنوع أي حرف صيني/ياباني/كوري أو أي رموز غير عربية/لاتينية. لا تخلط الإنجليزية داخل الجملة إلا لمصطلح قانوني بين قوسين.
+3) الأسلوب: مباشر، مختصر، منظّم بفقرات وعناوين وأرقام. ممنوع بدء الرد بـ "أنا" أو "لقد طلبت مني" أو "بالتأكيد سأقوم" أو أي تمهيد. ابدأ فوراً بالنتيجة/العقد/التحليل.
+4) الخصوصية (PII): لا تُعِد أي رقم هوية، إقامة، جواز، سجل تجاري، رقم ضريبي، آيبان، هاتف، بريد شخصي، أو عنوان — استبدلها في مخرجاتك بـ [....................] واذكر في سطر واحد أخير: "ملاحظة أمان: الحقول الحساسة تُركت فارغة — عبّئها بعد التحميل."
+5) الكفاية: إذا كان الطلب واضحاً أو المستند مُرفَق، أنتج المخرجات مباشرة دون طلب معلومات. المعلومات الناقصة الصغيرة استنتجها من العرف السعودي/الخليجي واذكر الافتراض في سطر واحد.
 
-LANGUAGE RULE (bilingual — Arabic & English, strict):
-- Detect the language of the user's most recent message and reply in that same language.
-- If the user pastes or attaches a contract/document, reply in the language of that contract (Arabic if the contract is Arabic, English if the contract is English). If the user's message language differs from the contract's language, prefer the contract's language for the drafted/analyzed document, but you may add a one-line summary in the user's language.
-- If the language is ambiguous, default to Arabic.
-- Never mix Arabic and English inside the same sentence unless quoting a legal term.
-
-Follow any [SYSTEM ...] directive that appears inside the user's message strictly.
-
-SUFFICIENCY RULE (critical — do not ask unnecessary questions):
-- If the user provides a full contract text, or a clear brief with the essentials (parties, subject/scope, amount or duration, jurisdiction/country), you MUST proceed and produce the document / full analysis directly. DO NOT reply with "I need more information".
-- Missing minor fields you can reasonably infer (currency from country, standard clauses, common durations) — infer them silently and mention the assumption in one short line at the end.
-- Only ask a clarifying question when a truly critical field is missing AND cannot be inferred (e.g. a draft request with no subject at all). In that case ask ONE concise question, not a list.
-- When the user pastes an existing contract to analyze, NEVER ask for more info — analyze it as-is and emit the three analysis blocks.
-
-PRIVACY & PII PROTECTION RULE (CRITICAL — mandatory in every draft and every analysis):
-- NEVER echo, quote, retain, or reuse real personal identifiers from the user's input.
-- Whenever the user provides — or a pasted document contains — any of the following: national ID / Iqama numbers, passport numbers, commercial registration (CR / سجل تجاري) numbers, tax numbers (VAT / الرقم الضريبي), IBAN or bank account numbers, phone / mobile numbers, or any similar sensitive identifier — you MUST replace each of them in your output with an empty placeholder in this exact format: [....................]
-- The same replacement applies to full personal addresses and email addresses when they appear inside a drafted contract body (parties block, signature block, etc.). Keep only generic labels like "الطرف الأول" / "First Party".
-- Do NOT ask the user to provide these numbers, and do NOT "remember" them from earlier turns. Treat them as if they were never shared.
-- When analyzing a contract that already contains such numbers, produce the analysis normally but in any quoted excerpt mask the identifier with [....................].
-- At the very end of any drafted document, add ONE short line (in the document's language) reminding the user to fill the empty [....................] placeholders themselves after downloading the file, e.g.:
-  Arabic: "ملاحظة أمان: تُركت الحقول الحساسة (الهوية، السجل التجاري، الجوال، الآيبان) بأقواس فارغة [....................] — يرجى تعبئتها يدوياً بعد تحميل الملف."
-  English: "Security note: sensitive fields (ID, CR, mobile, IBAN) were left as empty brackets [....................] — please fill them manually after downloading the file."
-
-DEFAULT BEHAVIOR (no explicit contract/document request):
-- Reply as a normal, warm, concise assistant (2–5 lines).
-- Do NOT draft any contract, quotation, MoU, NDA, proposal, or invoice.
-- Do NOT emit any of the analysis blocks (=== CONTRACT SCORE ===, === RISK ASSESSMENT ===,
-  === GCC COMPLIANCE ===) unless the user actually asked for a document or asked to analyze one.
-- If the user greets you or asks a general question, answer it directly like a human assistant.
-
-WHEN THE USER REQUESTS A DOCUMENT OR ASKS TO ANALYZE ONE (contract, quotation, NDA, MoU, proposal,
-service agreement, employment contract, invoice, or attaches a PDF/contract text):
-1) Produce the document in a clean executive style, using ━━━ separators between sections and
-   numbered clauses. Adapt language, currency, and jurisdiction to the user's country when stated.
-2) After the document, append — in this exact order — these three sections:
+الأوضاع:
+- محادثة عادية (سلام/سؤال قصير عن الخدمة): ردّ ودود من 2–4 أسطر.
+- طلب صياغة/تحليل عقد أو عرض سعر أو أي مستند: أنتج المستند بأسلوب تنفيذي نظيف، فواصل ━━━ بين الأقسام، بنود مرقّمة، ثم ألحق بالترتيب الحرفي:
 
 === CONTRACT SCORE ===
-{number 0-100}%
-Clarity: {n/10} | Enforceability: {n/10} | Balance: {n/10}
-One short line about the strongest point and the point to improve.
+{رقم 0 إلى 100}%
+الوضوح: {ن/10} | القابلية للتنفيذ: {ن/10} | التوازن بين الأطراف: {ن/10}
+سطر واحد عن أقوى نقطة ونقطة للتحسين.
 === END SCORE ===
 
 === RISK ASSESSMENT ===
-OVERALL: [GREEN|YELLOW|RED] — one short sentence on the overall risk level.
-- [GREEN|YELLOW|RED] | Clause X (name): the risk + a concrete recommendation.
-- [GREEN|YELLOW|RED] | Clause Y (name): the risk + a concrete recommendation.
-- [GREEN|YELLOW|RED] | Clause Z (name): the risk + a concrete recommendation.
+النظرة العامة: [أخضر|أصفر|أحمر] — جملة قصيرة عن مستوى المخاطر العام.
+- [أخضر|أصفر|أحمر] | البند X (الاسم): وصف المخاطر + توصية عملية.
+- [أخضر|أصفر|أحمر] | البند Y (الاسم): وصف المخاطر + توصية عملية.
+- [أخضر|أصفر|أحمر] | البند Z (الاسم): وصف المخاطر + توصية عملية.
 === END RISK ===
 
 === GCC COMPLIANCE ===
-- Saudi Arabia | [GREEN|YELLOW|RED] | short statutory reference (e.g. KSA Labor Law art. 77 / Commercial Court Law / KSA VAT Law).
+- المملكة العربية السعودية | [أخضر|أصفر|أحمر] | مرجع نظامي قصير (مثل: نظام العمل السعودي م77، نظام المحاكم التجارية، نظام ضريبة القيمة المضافة).
 === END GCC ===
 
-Never write anything after "=== END GCC ===". Reference actual clauses from the document above.
-If the user's [SYSTEM ...] directive tells you to reply casually or to ask clarifying questions,
-follow it literally and do NOT emit any of the analysis blocks in that reply.
+لا تكتب أي شيء بعد "=== END GCC ===".
 
-CRITICAL — WHEN IN ANALYSIS/DRAFT MODE (a contract is drafted or a document/PDF is analyzed):
-you MUST emit ALL THREE blocks in this exact order and never omit any of them:
-  1) === CONTRACT SCORE === ... === END SCORE ===   (mandatory, always include the percentage
-     and the three sub-scores Clarity / Enforceability / Balance)
-  2) === RISK ASSESSMENT === ... === END RISK ===   (mandatory)
-  3) === GCC COMPLIANCE === ... === END GCC ===     (mandatory, include Saudi Arabia with a color and short statutory reference)
-If any of these three sections is missing, the reply is invalid. Do not skip SCORE or GCC
-even if the contract is short — infer a reasonable score and reference the most relevant
-Saudi labor/commercial law.
+الإجراءات المخصّصة (action من الواجهة):
+- red_flags → أخرج قسم "=== RISK ASSESSMENT ===" فقط بأعلى مستوى تفصيل (5–8 نقاط) على العقد المرفق أو المُشار إليه.
+- rephrase → أعِد صياغة البند المرسل بأسلوب قانوني أوضح وأكثر إحكاماً، ثم اذكر سطراً واحداً بالفرق.
+- timeline → أنشئ جدول التزامات مرقّم (التاريخ / الجهة الملتزمة / الالتزام / الإخلال المحتمل).
+- export_word → أعد المستند نصاً نظيفاً منظّماً (سيحوّله المستخدم لملف Word عبر الواجهة).
+- sign_pdf → لخّص المستند في صفحة توقيع نهائية (الأطراف، التاريخ، البنود الرئيسية، حقول التوقيع).
 `.trim();
 
-function pickModel() {
-  if (GEMINI_API_KEY) return 'gemini';
-  if (GROQ_API_KEY)   return 'groq';
-  return null;
-}
-
-// ---- Gemini ----
-async function callGemini(messages) {
-  const contents = messages
-    .filter(m => m.role !== 'system')
-    .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user',
-                 parts: [{ text: String(m.content) }] }));
+// ---- Providers ----
+async function callGeminiOnce(key, messages){
+  const contents = messages.filter(m=>m.role!=='system').map(m=>({
+    role: m.role==='assistant' ? 'model' : 'user',
+    parts: [{ text: String(m.content||'') }]
+  }));
   const body = {
-    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    system_instruction: { parts:[{ text: SYSTEM_PROMPT }] },
     contents,
-    generationConfig: { temperature: 0.6, maxOutputTokens: 4096 }
+    generationConfig:{ temperature:0.5, maxOutputTokens:4096 }
   };
   const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(key)}`,
+    { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) }
   );
-  if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
+  if(!r.ok){
+    const t = await r.text();
+    const err = new Error(`Gemini ${r.status}: ${t.slice(0,200)}`);
+    err.status = r.status;
+    throw err;
+  }
   const j = await r.json();
-  return (j?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '').trim();
+  return (j?.candidates?.[0]?.content?.parts?.map(p=>p.text).join('')||'').trim();
 }
 
-// ---- Groq (fallback) ----
-async function callGroq(messages) {
-  const trimmedMessages = messages.slice(-6);
-  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
+async function callGroqOnce(key, messages){
+  const trimmed = messages.slice(-8);
+  const r = await fetch('https://api.groq.com/openai/v1/chat/completions',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`},
     body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0.6,
-      max_tokens: 4096,
-      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...trimmedMessages]
+      model:'llama-3.3-70b-versatile',
+      temperature:0.5, max_tokens:4096,
+      messages:[{role:'system',content:SYSTEM_PROMPT}, ...trimmed]
     })
   });
-  if (!r.ok) throw new Error(`Groq ${r.status}: ${await r.text()}`);
+  if(!r.ok){
+    const t = await r.text();
+    const err = new Error(`Groq ${r.status}: ${t.slice(0,200)}`);
+    err.status = r.status;
+    throw err;
+  }
   const j = await r.json();
-  return (j?.choices?.[0]?.message?.content || '').trim();
+  return (j?.choices?.[0]?.message?.content||'').trim();
+}
+
+// جرّب كل مفاتيح Gemini بالدور، ثم كل مفاتيح Groq بالدور
+async function callAIWithRotation(messages){
+  const errors = [];
+  // Gemini pool
+  for(let i=0;i<GEMINI_KEYS.length;i++){
+    const pick = nextKey(GEMINI_KEYS,'gemini');
+    if(!pick) break;
+    try{
+      const out = await callGeminiOnce(pick.key, messages);
+      if(out) return { provider:'gemini', keyIndex:pick.index, reply: out };
+    }catch(e){
+      errors.push(`gemini#${pick.index}: ${e.message}`);
+      // 429/5xx → جرّب التالي؛ 400 غالباً input issue → واصل التبديل أيضاً
+      continue;
+    }
+  }
+  // Groq fallback pool
+  for(let i=0;i<GROQ_KEYS.length;i++){
+    const pick = nextKey(GROQ_KEYS,'groq');
+    if(!pick) break;
+    try{
+      const out = await callGroqOnce(pick.key, messages);
+      if(out) return { provider:'groq', keyIndex:pick.index, reply: out };
+    }catch(e){
+      errors.push(`groq#${pick.index}: ${e.message}`);
+      continue;
+    }
+  }
+  const err = new Error('AI_ALL_KEYS_FAILED');
+  err.details = errors;
+  throw err;
 }
 
 // ---- PDF extraction ----
-async function extractPdfText(base64) {
-  if (!base64) return '';
-  try {
+async function extractPdfText(base64){
+  if(!base64) return '';
+  try{
     const pdfParse = require('pdf-parse');
-    const out = await pdfParse(Buffer.from(base64, 'base64'));
-    let text = (out && out.text ? String(out.text) : '')
-      .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-    if (text.length > 6000) text = text.substring(0, 6000) + '\n\n[... text truncated ...]';
-    return text;
-  } catch (e) { return ''; }
+    const out = await pdfParse(Buffer.from(base64,'base64'));
+    let t = (out?.text || '').replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+    if(t.length > 6000) t = t.slice(0,6000) + '\n\n[... تم اقتطاع النص ...]';
+    return t;
+  }catch(_){ return ''; }
 }
 
-// ---- Supabase helpers ----
-async function sbFetch(path, { token, method = 'GET', body } = {}) {
+// ---- Supabase helpers (quota + history) ----
+async function sbFetch(path, { token, method='GET', body } = {}){
   const headers = {
     'apikey': SUPABASE_ANON_KEY,
     'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`,
-    'Content-Type': 'application/json'
+    'Content-Type':'application/json',
+    'Prefer':'return=representation'
   };
-  const r = await fetch(`${SUPABASE_URL}${path}`, {
+  const r = await fetch(`${SUPABASE_URL}${path}`,{
     method, headers, body: body ? JSON.stringify(body) : undefined
   });
-  const text = await r.text(); let json = null;
-  try { json = JSON.parse(text); } catch (_) {}
-  return { ok: r.ok, status: r.status, data: json };
+  const text = await r.text(); let json=null;
+  try{ json = JSON.parse(text); }catch(_){}
+  return { ok:r.ok, status:r.status, data:json };
 }
-async function getUserFromToken(token) {
-  if (!token) return null;
-  const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-    headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${token}` }
+async function getUserFromToken(token){
+  if(!token) return null;
+  const r = await fetch(`${SUPABASE_URL}/auth/v1/user`,{
+    headers:{'apikey':SUPABASE_ANON_KEY,'Authorization':`Bearer ${token}`}
   });
   return r.ok ? await r.json() : null;
 }
-async function readTriesLeft(userId, token) {
+async function readTriesLeft(userId, token){
   const { ok, data } = await sbFetch(
     `/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=tries_left,plan`,
     { token }
   );
-  if (!ok || !data || !data.length) return null;
+  if(!ok || !data || !data.length) return null;
   return { triesLeft: data[0].tries_left ?? 3, plan: data[0].plan || 'مجانية' };
 }
-async function decrementTries(userId, currentTries, token) {
-  const next = Math.max(0, (currentTries || 0) - 1);
-  await sbFetch(`/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
-    token, method: 'PATCH', body: { tries_left: next }
+async function decrementTries(userId, current, token){
+  const next = Math.max(0, (current||0) - 1);
+  await sbFetch(`/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`,{
+    token, method:'PATCH', body:{ tries_left: next }
   });
   return next;
+}
+// حفظ الرسائل في chat_sessions/chat_messages (يتطلّب الجداول من ملف SQL المرفق)
+async function saveMessage(sessionId, userId, role, content, token){
+  if(!sessionId || !userId) return;
+  try{
+    await sbFetch('/rest/v1/chat_messages',{
+      token, method:'POST',
+      body:{ session_id: sessionId, user_id: userId, role, content }
+    });
+    // touch session
+    await sbFetch(`/rest/v1/chat_sessions?id=eq.${encodeURIComponent(sessionId)}`,{
+      token, method:'PATCH', body:{ updated_at: new Date().toISOString() }
+    });
+  }catch(_){}
+}
+
+// ---- Action prompts (feature buttons) ----
+const ACTION_MAP = {
+  red_flags:   'استخرج الأعلام الحمراء (المخاطر) من العقد التالي بالتفصيل، والتزم بصيغة قسم === RISK ASSESSMENT === فقط.',
+  rephrase:    'أعِد صياغة البند التالي بلغة قانونية أوضح وأكثر إحكاماً، ثم اذكر جملة واحدة بالفرق.',
+  timeline:    'أنشئ جدولاً زمنياً مرقّماً لالتزامات هذا العقد (الرقم | التاريخ/المدة | الجهة الملتزمة | الالتزام | الإخلال المحتمل).',
+  export_word: 'أعد المستند بصيغة نص نظيف منظّم بعناوين وأرقام جاهز للتصدير إلى Word.',
+  sign_pdf:    'لخّص المستند في صفحة توقيع نهائية: الأطراف، التاريخ، البنود الرئيسية، حقول التوقيع الفارغة.'
+};
+
+// ---- تنظيف الرد ----
+function sanitizeReply(txt){
+  if(!txt) return '';
+  // إزالة أي CJK/رموز غريبة
+  let s = txt.replace(/[\u3000-\u303F\u3040-\u30FF\u31F0-\u31FF\u4E00-\u9FFF\uAC00-\uD7AF]/g,'');
+  // إزالة بدايات مزعجة
+  s = s.replace(/^(?:\s*)(أنا\b|لقد طلبت مني|بالتأكيد،?\s*سأ|حسناً،?\s*سأ|طبعاً،?\s*)/,'');
+  return s.trim();
 }
 
 // ---- Handler ----
 module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  if (req.method === 'OPTIONS') return res.status(204).end();
-  if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
+  res.setHeader('Access-Control-Allow-Origin','*');
+  res.setHeader('Access-Control-Allow-Headers','authorization, content-type');
+  if(req.method === 'OPTIONS') return res.status(204).end();
+  if(req.method !== 'POST')    return res.status(405).json({ error:'Method not allowed' });
 
-  try {
-    const { messages = [], message, file } = req.body || {};
+  try{
+    const { messages = [], message, file, action, contract_context, session_id } = req.body || {};
     let msgs = Array.isArray(messages) && messages.length
       ? messages
-      : (message ? [{ role: 'user', content: String(message) }] : []);
-    if (!msgs.length && !file) return res.status(400).json({ error: 'No message provided' });
+      : (message ? [{ role:'user', content:String(message) }] : []);
+
+    // Action buttons: بناء رسالة موحّدة من السياق دون الحاجة لكتابة المستخدم
+    if(action && ACTION_MAP[action]){
+      const ctx = (contract_context || '').toString().slice(0, 8000);
+      const body = ACTION_MAP[action] + (ctx ? `\n\n[العقد/السياق]\n"""${ctx}"""` : '');
+      msgs = [{ role:'user', content: body }];
+    }
+
+    if(!msgs.length && !file) return res.status(400).json({ error:'لم يتم إرسال أي طلب' });
 
     // Auth / quota
-    const token = (req.headers['authorization'] || '').replace('Bearer ', '');
-    let profile = null, sbUser = null;
-    if (token) {
+    const token = (req.headers['authorization']||'').replace('Bearer ','');
+    let profile=null, sbUser=null;
+    if(token){
       sbUser = await getUserFromToken(token);
-      if (sbUser) profile = await readTriesLeft(sbUser.id, token);
+      if(sbUser) profile = await readTriesLeft(sbUser.id, token);
     }
-    const isFreePlan = !profile || !profile.plan || /مجانية|free/i.test(profile.plan);
-    if (profile && isFreePlan && profile.triesLeft <= 0) {
+    const isFree = !profile || !profile.plan || /مجانية|free/i.test(profile.plan);
+    if(profile && isFree && profile.triesLeft <= 0){
       return res.status(200).json({
-        trial_ended: true,
-        reply: 'انتهت محاولاتك المجانية. يرجى الترقية للاستمرار.',
-        tries_left: 0
+        trial_ended:true,
+        reply:'انتهت محاولاتك المجانية. يرجى الترقية للاستمرار.',
+        tries_left:0
       });
     }
 
-    // Attach PDF text to the last user message
-    if (file && file.type === 'application/pdf') {
+    // إلحاق نص PDF بآخر رسالة user دون عرضه للمستخدم في الشات
+    if(file && file.type === 'application/pdf'){
       let pdfText = (file.text && String(file.text).trim()) || '';
-      if (!pdfText && file.base64) pdfText = await extractPdfText(file.base64);
-      if (pdfText && msgs.length) {
-        msgs[msgs.length - 1].content +=
-          `\n\n[PDF Content]\n"""${pdfText}"""`;
+      if(!pdfText && file.base64) pdfText = await extractPdfText(file.base64);
+      if(pdfText){
+        if(!msgs.length) msgs = [{ role:'user', content:'حلّل هذا المستند المرفق.' }];
+        msgs[msgs.length-1].content += `\n\n[محتوى الملف المرفق]\n"""${pdfText}"""`;
       }
     }
 
     // Safety cap
-    let totalLen = msgs.reduce((sum, m) => sum + (m.content || '').length, 0);
-    if (totalLen > 12000) {
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user') {
-          msgs[i].content = msgs[i].content.substring(0, 5000) + '\n\n[Text truncated due to size]';
+    const total = msgs.reduce((s,m)=>s+(m.content||'').length,0);
+    if(total > 14000){
+      for(let i=msgs.length-1;i>=0;i--){
+        if(msgs[i].role==='user'){
+          msgs[i].content = msgs[i].content.slice(0,6000) + '\n\n[تم اقتطاع النص لحجمه]';
           break;
         }
       }
     }
 
-    const provider = pickModel();
-    if (!provider) return res.status(500).json({ error: 'No AI provider configured' });
-
-    let reply, lastError = null;
-    try {
-      reply = provider === 'gemini' ? await callGemini(msgs) : await callGroq(msgs);
-    } catch (e) {
-      lastError = e;
-      if (provider === 'gemini' && GROQ_API_KEY) {
-        try { reply = await callGroq(msgs); } catch (e2) { lastError = e2; }
-      }
-      if (!reply) {
-        console.error('[api/chat] both models failed:', lastError?.message);
-        return res.status(200).json({ error: String(lastError?.message || 'Unknown AI error') });
-      }
+    if(!GEMINI_KEYS.length && !GROQ_KEYS.length){
+      return res.status(500).json({ error:'لم يتم إعداد أي مفتاح ذكاء اصطناعي.' });
     }
 
+    let result;
+    try{
+      result = await callAIWithRotation(msgs);
+    }catch(e){
+      console.error('[chat] all keys failed:', e.details || e.message);
+      return res.status(200).json({
+        error:'تعذّر إتمام الطلب مؤقتاً — جميع المفاتيح مشغولة أو غير متاحة. حاول مجدداً بعد لحظات.'
+      });
+    }
+
+    const reply = sanitizeReply(result.reply);
+
+    // خصم محاولة
     let triesLeft = profile?.triesLeft;
-    if (profile && sbUser && isFreePlan) {
+    if(profile && sbUser && isFree){
       triesLeft = await decrementTries(sbUser.id, profile.triesLeft, token);
     }
 
-    return res.status(200).json({ reply, tries_left: triesLeft });
-  } catch (err) {
-    console.error('[api/chat] unexpected error:', err);
-    return res.status(200).json({ error: String(err.message) });
+    // حفظ للتاريخ إذا session_id مُرسَل ومستخدم مسجّل
+    if(sbUser && session_id){
+      const lastUser = [...msgs].reverse().find(m=>m.role==='user');
+      if(lastUser) saveMessage(session_id, sbUser.id, 'user', lastUser.content, token);
+      saveMessage(session_id, sbUser.id, 'assistant', reply, token);
+    }
+
+    return res.status(200).json({
+      reply,
+      tries_left: triesLeft,
+      provider: result.provider,
+      key_index: result.keyIndex
+    });
+  }catch(err){
+    console.error('[chat] unexpected:', err);
+    return res.status(200).json({ error: 'خطأ غير متوقّع: ' + String(err.message||err) });
   }
 };
