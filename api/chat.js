@@ -105,6 +105,7 @@ function sanitizeReply(text) {
 }
 
 // ---------- Gemini call with round-robin + retry ----------
+const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash'];
 async function callGeminiOnce(apiKey, messages) {
   const contents = messages
     .filter(m => m.role !== 'system')
@@ -115,19 +116,24 @@ async function callGeminiOnce(apiKey, messages) {
     contents,
     generationConfig: { temperature: 0.55, maxOutputTokens: 4096 }
   };
-  const r = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-  );
-  if (!r.ok) {
+  let lastErr = null;
+  for (const model of GEMINI_MODELS) {
+    const r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+    );
+    if (r.ok) {
+      const j = await r.json();
+      return (j?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '').trim();
+    }
     const errText = await r.text();
-    const err = new Error(`Gemini ${r.status}: ${errText}`);
-    err.status = r.status;
-    err.rateLimited = (r.status === 429 || r.status === 503);
-    throw err;
+    lastErr = new Error(`Gemini ${r.status} (${model}): ${errText}`);
+    lastErr.status = r.status;
+    lastErr.rateLimited = (r.status === 429 || r.status === 503);
+    if (r.status === 400 || r.status === 404) continue; // model deprecated → try next
+    throw lastErr;
   }
-  const j = await r.json();
-  return (j?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '').trim();
+  throw lastErr || new Error('Gemini: all models failed');
 }
 async function callGeminiRR(messages) {
   if (!GEMINI_KEYS.length) throw new Error('No Gemini keys configured');
@@ -149,27 +155,35 @@ async function callGeminiRR(messages) {
 }
 
 // ---------- Groq call with round-robin ----------
+const GROQ_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-70b-8192'];
 async function callGroqOnce(apiKey, messages) {
   const trimmed = messages.slice(-6);
-  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      temperature: 0.55,
-      max_tokens: 4096,
-      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...trimmed]
-    })
-  });
-  if (!r.ok) {
+  let lastErr = null;
+  for (const model of GROQ_MODELS) {
+    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        temperature: 0.55,
+        max_tokens: 4096,
+        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...trimmed]
+      })
+    });
+    if (r.ok) {
+      const j = await r.json();
+      return (j?.choices?.[0]?.message?.content || '').trim();
+    }
     const errText = await r.text();
-    const err = new Error(`Groq ${r.status}: ${errText}`);
-    err.status = r.status;
-    err.rateLimited = (r.status === 429 || r.status === 503);
-    throw err;
+    lastErr = new Error(`Groq ${r.status} (${model}): ${errText}`);
+    lastErr.status = r.status;
+    lastErr.rateLimited = (r.status === 429 || r.status === 503);
+    // model_decommissioned / not_found → try next model on same key
+    if (r.status === 400 || r.status === 404) continue;
+    // other errors → stop trying more models on this key, let RR advance to next key
+    throw lastErr;
   }
-  const j = await r.json();
-  return (j?.choices?.[0]?.message?.content || '').trim();
+  throw lastErr || new Error('Groq: all models failed');
 }
 async function callGroqRR(messages) {
   if (!GROQ_KEYS.length) throw new Error('No Groq keys configured');
@@ -242,6 +256,9 @@ async function decrementTries(userId, currentTries, token) {
 // ---------- Handler ----------
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Max-Age', '86400');
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
 
@@ -305,8 +322,9 @@ module.exports = async (req, res) => {
     }
     if (!reply) {
       return res.status(200).json({
-        error: 'الخدمة مشغولة حالياً بسبب الضغط على المفاتيح. حاول بعد لحظات.',
-        detail: String(lastError?.message || 'unknown')
+        error: 'الخدمة مشغولة حالياً. حاول بعد لحظات.',
+        detail: String(lastError?.message || 'unknown'),
+        keys: { gemini: GEMINI_KEYS.length, groq: GROQ_KEYS.length }
       });
     }
 
