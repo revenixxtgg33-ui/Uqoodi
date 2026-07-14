@@ -261,6 +261,37 @@ async function decrementTries(userId, currentTries, token) {
   return next;
 }
 
+
+// ---------- Chat history: user-scoped read/write to Supabase ----------
+// جدول chat_messages(user_id uuid, role text, content text, created_at timestamptz)
+// يجب أن يكون RLS مُفعّلاً وأن تسمح السياسات فقط بـ user_id = auth.uid().
+async function loadChatHistoryForUser(userId, token, limit = 40) {
+  if (!userId || !token) return [];
+  const { ok, data } = await sbFetch(
+    `/rest/v1/chat_messages?user_id=eq.${encodeURIComponent(userId)}&select=role,content,created_at&order=created_at.asc&limit=${limit}`,
+    { token }
+  );
+  if (!ok || !Array.isArray(data)) return [];
+  return data.map(r => ({ role: r.role, content: r.content }));
+}
+async function saveChatMessage(userId, token, role, content) {
+  if (!userId || !token || !content) return;
+  try {
+    await sbFetch(`/rest/v1/chat_messages`, {
+      token, method: 'POST',
+      body: { user_id: userId, role, content: String(content).slice(0, 20000) }
+    });
+  } catch (_) {}
+}
+async function clearChatHistoryForUser(userId, token) {
+  if (!userId || !token) return;
+  try {
+    await sbFetch(`/rest/v1/chat_messages?user_id=eq.${encodeURIComponent(userId)}`, {
+      token, method: 'DELETE'
+    });
+  } catch (_) {}
+}
+
 // ---------- Handler ----------
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -271,19 +302,31 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { messages = [], message, file } = req.body || {};
-    let msgs = Array.isArray(messages) && messages.length
-      ? messages
-      : (message ? [{ role: 'user', content: String(message) }] : []);
-    if (!msgs.length && !file) return res.status(400).json({ error: 'لا توجد رسالة' });
+    const { messages = [], message, file, action } = req.body || {};
 
-    // Auth / quota
+    // Auth (needed for history actions & user-scoped persistence)
     const token = (req.headers['authorization'] || '').replace('Bearer ', '');
     let profile = null, sbUser = null;
     if (token) {
       sbUser = await getUserFromToken(token);
       if (sbUser) profile = await readTriesLeft(sbUser.id, token);
     }
+
+    // --- History endpoints: strictly scoped to current user_id ---
+    if (action === 'history') {
+      if (!sbUser) return res.status(200).json({ history: [] });
+      const history = await loadChatHistoryForUser(sbUser.id, token);
+      return res.status(200).json({ history, user_id: sbUser.id });
+    }
+    if (action === 'clear') {
+      if (sbUser) await clearChatHistoryForUser(sbUser.id, token);
+      return res.status(200).json({ ok: true });
+    }
+
+    let msgs = Array.isArray(messages) && messages.length
+      ? messages
+      : (message ? [{ role: 'user', content: String(message) }] : []);
+    if (!msgs.length && !file) return res.status(400).json({ error: 'لا توجد رسالة' });
     const isFreePlan = !profile || !profile.plan || /مجانية|free/i.test(profile.plan);
     if (profile && isFreePlan && profile.triesLeft <= 0) {
       return res.status(200).json({
@@ -344,7 +387,16 @@ module.exports = async (req, res) => {
       triesLeft = await decrementTries(sbUser.id, profile.triesLeft, token);
     }
 
-    return res.status(200).json({ reply, tries_left: triesLeft });
+    // Persist under the current user_id ONLY — never bleed across accounts.
+    if (sbUser && token) {
+      try {
+        const lastUser = [...msgs].reverse().find(m => m.role === 'user');
+        if (lastUser && lastUser.content) await saveChatMessage(sbUser.id, token, 'user', lastUser.content);
+        if (reply)                        await saveChatMessage(sbUser.id, token, 'assistant', reply);
+      } catch (_) {}
+    }
+
+    return res.status(200).json({ reply, tries_left: triesLeft, user_id: sbUser ? sbUser.id : null });
   } catch (err) {
     console.error('[api/chat] unexpected error:', err);
     return res.status(200).json({ error: 'خطأ غير متوقع: ' + String(err.message) });
