@@ -1,0 +1,473 @@
+// api/chat.js — Uqoodi AI
+// - Round-Robin على عدة مفاتيح Gemini و Groq (GEMINI_API_KEYS / GROQ_API_KEYS بفواصل ، أو المفتاح المفرد القديم)
+// - Guardrails صارمة: SaaS للعقود فقط، رد عربي فصيح، ممنوع البدء بـ "أنا" أو "لقد طلبت مني"، تنظيف الأحرف الأجنبية
+// - رسائل خطأ واضحة بدل الشاشة السوداء
+
+// ---------- Keys (single OR comma-separated for round-robin) ----------
+function parseKeys(single, multi) {
+  const list = [];
+  if (multi) String(multi).split(',').map(s => s.trim()).filter(Boolean).forEach(k => list.push(k));
+  if (single && !list.includes(single)) list.push(single);
+  return list;
+}
+const GEMINI_KEYS = parseKeys(process.env.GEMINI_API_KEY, process.env.GEMINI_API_KEYS);
+const GROQ_KEYS   = parseKeys(process.env.GROQ_API_KEY,   process.env.GROQ_API_KEYS);
+
+// Round-robin cursor (in-memory per instance)
+let _geminiCursor = 0, _groqCursor = 0;
+function nextKey(pool, cursorRef) {
+  if (!pool.length) return null;
+  const idx = cursorRef.value % pool.length;
+  cursorRef.value = (cursorRef.value + 1) % pool.length;
+  return { key: pool[idx], idx };
+}
+
+const SUPABASE_URL       = process.env.SUPABASE_URL       || 'https://jfhoioozzklxvrncjlhk.supabase.co';
+const SUPABASE_ANON_KEY  = process.env.SUPABASE_ANON_KEY  || 'sb_publishable_bcPvrDmn0Eboc3sB2o3mCA_bX7vB5Re';
+
+// ---------- System Prompt (Guardrails) ----------
+const SYSTEM_PROMPT = `
+أنت "عقودي AI" — مساعد SaaS متخصص فقط في تحليل وإنشاء العقود وعروض الأسعار والمستندات التجارية للسوق السعودي والخليجي. أنت أداة مساعدة وليست بديلاً عن محامٍ مرخّص.
+
+قواعد صارمة يجب الالتزام بها حرفياً:
+
+1) نطاق العمل (Guardrails):
+   - ممنوع الرد على أي مواضيع خارج السياق: الطقس، البرمجة، الأخبار، الرياضة، الطبخ، الترفيه، الأسئلة العامة.
+   - إذا سألك المستخدم شيئاً خارج نطاق العقود/المستندات التجارية، اعتذر بجملة قصيرة مهذبة واحدة فقط بنفس لغة رسالته:
+     • عربي: "عذراً، أنا مساعد متخصص في العقود والمستندات التجارية فقط. كيف أساعدك بمستند اليوم؟"
+     • English: "Sorry, I'm specialized in contracts and business documents only. How can I help you with a document today?"
+
+2) لغة الرد (إلزامي حرفياً — لا استثناء):
+   - اكتشف اللغة السائدة في آخر رسالة للمستخدم (وفي أي ملف مرفق). المعيار: إذا احتوت الرسالة/الملف على أي حرف عربي فهي عربية، وإلا فهي إنجليزية.
+   - الرد يجب أن يكون كاملاً بلغة المستخدم بدون أي خلط:
+     • إذا كانت الرسالة عربية: كل شيء بالعربية الفصحى بما في ذلك العناوين والملصقات وأسماء الأقسام والتوصيات وشرح المخاطر (مثلاً: "التقييم العام" بدل OVERALL، "أخضر/أصفر/أحمر" بدل GREEN/YELLOW/RED عند الشرح، وأسماء البنود عربية).
+     • إذا كانت الرسالة إنجليزية: كل شيء بالإنجليزية الاحترافية.
+   - يُسمح فقط بترك الوسوم الهيكلية التالية كما هي بالإنجليزية لأنها إشارات نظام للواجهة (لا تترجمها ولا تحذفها): === CONTRACT SCORE ===, === END SCORE ===, === RISK ASSESSMENT ===, === END RISK ===, === GCC COMPLIANCE ===, === END GCC ===, OVERALL:, GREEN, YELLOW, RED. أما بقية الكلمات فبلغة المستخدم.
+   - ممنوع الأحرف الصينية/اليابانية/الكورية أو أي رموز أجنبية غريبة.
+   - ممنوع خلط لغتين في نفس الجملة أو نفس القسم إلا لمصطلح قانوني تقني لا مقابل له.
+
+3) أسلوب الرد:
+   - ابدأ الرد مباشرة بالمحتوى/التحليل. ممنوع تماماً البدء بـ: "أنا"، "لقد طلبت مني"، "بالتأكيد"، "بكل سرور"، "سأقوم"، "دعني"، "Sure", "Of course", "I'll", "Let me".
+   - الرد مباشر، مختصر، منظم بفقرات وعناوين واضحة.
+
+4) حماية الخصوصية (PII):
+   - لا تكرر أبداً أي أرقام هوية، إقامة، جواز، سجل تجاري، رقم ضريبي، آيبان، أو أرقام جوال حقيقية من المستخدم.
+   - استبدلها دائماً في المخرجات بـ: [....................]
+   - في نهاية أي مستند مسحوب: أضف سطر تذكير واحد بلغة المستخدم:
+     • عربي: "ملاحظة أمان: تُركت الحقول الحساسة بأقواس فارغة [....................] — يرجى تعبئتها يدوياً بعد التحميل."
+     • English: "Security note: Sensitive fields left as empty brackets [....................] — please fill them manually after download."
+
+5) قاعدة الاكتفاء:
+   - إذا أعطاك المستخدم عقداً كاملاً أو موجزاً واضحاً، أنجز مباشرة بدون طلب معلومات إضافية.
+   - إذا نقص حقل بسيط (عملة، مدة قياسية)، استنتجه بصمت وأشر لذلك بسطر واحد في النهاية.
+   - لا تطلب معلومات إلا إذا نقص عنصر جوهري لا يمكن استنتاجه.
+
+6) اتّبع أي توجيه [SYSTEM ...] داخل رسالة المستخدم حرفياً، مع الحفاظ على قاعدة اللغة (بند 2).
+
+7) عند تحليل عقد أو صياغة مستند، أضف بعد المحتوى وبهذا الترتيب الحرفي (بلغة المستخدم داخل الأسطر، والوسوم كما هي):
+
+=== CONTRACT SCORE ===
+{رقم 0-100}%
+{عربي: الوضوح: {رقم/10} | القابلية للتنفيذ: {رقم/10} | التوازن: {رقم/10} — أو — English: Clarity: {n/10} | Enforceability: {n/10} | Balance: {n/10}}
+سطر واحد بلغة المستخدم عن أقوى نقطة ونقطة يجب تحسينها.
+=== END SCORE ===
+
+=== RISK ASSESSMENT ===
+OVERALL: [GREEN|YELLOW|RED] — جملة موجزة بلغة المستخدم.
+- [GREEN|YELLOW|RED] | (اسم البند بلغة المستخدم): المخاطرة + التوصية بلغة المستخدم.
+- [GREEN|YELLOW|RED] | (اسم البند بلغة المستخدم): المخاطرة + التوصية بلغة المستخدم.
+- [GREEN|YELLOW|RED] | (اسم البند بلغة المستخدم): المخاطرة + التوصية بلغة المستخدم.
+=== END RISK ===
+
+=== GCC COMPLIANCE ===
+- (اسم الدولة بلغة المستخدم) | [GREEN|YELLOW|RED] | مرجع نظامي مختصر بلغة المستخدم.
+=== END GCC ===
+
+لا تكتب أي شيء بعد END GCC.
+
+8) في المحادثة العادية (بدون طلب مستند)، رد بأسلوب موجز (2-4 أسطر) بدون أقسام تحليلية.
+`.trim();
+
+// ---------- Response Sanitizer ----------
+function sanitizeReply(text) {
+  if (!text) return '';
+  let t = String(text);
+
+  // 1) شيل الأحرف الصينية/اليابانية/الكورية/رموز غريبة
+  t = t.replace(/[\u4e00-\u9fff\u3040-\u30ff\u3400-\u4dbf\uac00-\ud7af]/g, '');
+  // 2) شيل رموز التحكم
+  t = t.replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F]/g, '');
+  // 3) شيل السطر الأول لو يبدأ بـ "أنا/لقد طلبت مني/بالتأكيد..."
+  const banned = /^\s*(?:\*+\s*)?(?:أنا\b|لقد\s+طلبت\s+مني|طلبت\s+مني|بالتأكيد[!،.]?|بكل\s+سرور|سأقوم\b|دعني\s+|إليك\s+|هذا\s+هو\s+الرد|Sure[!,.]?|Of course[!,.]?|I('|’)ll\b|I\s+will\b|Let me\b|Here\s+is)/i;
+  const lines = t.split(/\n/);
+  while (lines.length && banned.test(lines[0])) {
+    lines.shift();
+    // بعد شيل السطر، شيل الفراغات الأولى
+    while (lines.length && !lines[0].trim()) lines.shift();
+  }
+  // 4) لو أول جملة داخل نفس السطر بدأت بممنوع، اقطع لأول علامة ترقيم
+  if (lines.length && banned.test(lines[0])) {
+    lines[0] = lines[0].replace(banned, '').replace(/^[،:\-—.\s]+/, '');
+  }
+  return lines.join('\n').trim();
+}
+
+// ---------- Gemini call with round-robin + retry ----------
+const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash'];
+async function callGeminiOnce(apiKey, messages) {
+  const contents = messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user',
+                 parts: [{ text: String(m.content) }] }));
+  const body = {
+    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents,
+    generationConfig: { temperature: 0.55, maxOutputTokens: 4096 }
+  };
+  let lastErr = null;
+  for (const model of GEMINI_MODELS) {
+    const r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+    );
+    if (r.ok) {
+      const j = await r.json();
+      return (j?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '').trim();
+    }
+    const errText = await r.text();
+    lastErr = new Error(`Gemini ${r.status} (${model}): ${errText}`);
+    lastErr.status = r.status;
+    lastErr.rateLimited = (r.status === 429 || r.status === 503);
+    if (r.status === 400 || r.status === 404) continue; // model deprecated → try next
+    throw lastErr;
+  }
+  throw lastErr || new Error('Gemini: all models failed');
+}
+async function callGeminiRR(messages) {
+  if (!GEMINI_KEYS.length) throw new Error('No Gemini keys configured');
+  let lastErr = null;
+  const cursorRef = { value: _geminiCursor };
+  for (let i = 0; i < GEMINI_KEYS.length; i++) {
+    const { key } = nextKey(GEMINI_KEYS, cursorRef);
+    try {
+      const out = await callGeminiOnce(key, messages);
+      _geminiCursor = cursorRef.value; // advance only on success
+      return out;
+    } catch (e) {
+      lastErr = e;
+      // rate-limit / 5xx → جرّب المفتاح التالي. أخطاء أخرى → أوقف الدوران على Gemini.
+      if (!e.rateLimited && (e.status && e.status < 500)) break;
+    }
+  }
+  throw lastErr || new Error('Gemini pool exhausted');
+}
+
+// ---------- Groq call with round-robin ----------
+const GROQ_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-70b-8192'];
+async function callGroqOnce(apiKey, messages) {
+  const trimmed = messages.slice(-6);
+  let lastErr = null;
+  for (const model of GROQ_MODELS) {
+    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        temperature: 0.55,
+        max_tokens: 4096,
+        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...trimmed]
+      })
+    });
+    if (r.ok) {
+      const j = await r.json();
+      return (j?.choices?.[0]?.message?.content || '').trim();
+    }
+    const errText = await r.text();
+    lastErr = new Error(`Groq ${r.status} (${model}): ${errText}`);
+    lastErr.status = r.status;
+    lastErr.rateLimited = (r.status === 429 || r.status === 503);
+    // model_decommissioned / not_found → try next model on same key
+    if (r.status === 400 || r.status === 404) continue;
+    // other errors → stop trying more models on this key, let RR advance to next key
+    throw lastErr;
+  }
+  throw lastErr || new Error('Groq: all models failed');
+}
+async function callGroqRR(messages) {
+  if (!GROQ_KEYS.length) throw new Error('No Groq keys configured');
+  let lastErr = null;
+  const cursorRef = { value: _groqCursor };
+  for (let i = 0; i < GROQ_KEYS.length; i++) {
+    const { key } = nextKey(GROQ_KEYS, cursorRef);
+    try {
+      const out = await callGroqOnce(key, messages);
+      _groqCursor = cursorRef.value;
+      return out;
+    } catch (e) {
+      lastErr = e;
+      if (!e.rateLimited && (e.status && e.status < 500)) break;
+    }
+  }
+  throw lastErr || new Error('Groq pool exhausted');
+}
+
+// ---------- PDF extraction ----------
+async function extractPdfText(base64) {
+  if (!base64) return '';
+  try {
+    const pdfParse = require('pdf-parse');
+    const out = await pdfParse(Buffer.from(base64, 'base64'));
+    let text = (out && out.text ? String(out.text) : '')
+      .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    if (text.length > 6000) text = text.substring(0, 6000) + '\n\n[... text truncated ...]';
+    return text;
+  } catch (e) { return ''; }
+}
+
+// ---------- Supabase helpers (unchanged) ----------
+async function sbFetch(path, { token, method = 'GET', body } = {}) {
+  const headers = {
+    'apikey': SUPABASE_ANON_KEY,
+    'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`,
+    'Content-Type': 'application/json'
+  };
+  const r = await fetch(`${SUPABASE_URL}${path}`, {
+    method, headers, body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await r.text(); let json = null;
+  try { json = JSON.parse(text); } catch (_) {}
+  return { ok: r.ok, status: r.status, data: json };
+}
+async function getUserFromToken(token) {
+  if (!token) return null;
+  const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${token}` }
+  });
+  return r.ok ? await r.json() : null;
+}
+async function readTriesLeft(userId, token) {
+  const { ok, data } = await sbFetch(
+    `/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=tries_left,plan`,
+    { token }
+  );
+  if (!ok || !data || !data.length) return null;
+  return { triesLeft: data[0].tries_left ?? 3, plan: data[0].plan || 'مجانية' };
+}
+async function decrementTries(userId, currentTries, token) {
+  const next = Math.max(0, (currentTries || 0) - 1);
+  await sbFetch(`/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
+    token, method: 'PATCH', body: { tries_left: next }
+  });
+  return next;
+}
+
+// ---------- Token balance (user_tokens table) ----------
+// جدول user_tokens(user_id uuid PK/FK, balance int, last_updated timestamptz)
+// RLS: كل مستخدم يقرأ/يعدّل صفه فقط.
+const FEATURE_COSTS = {
+  explain: 3,
+  redflags: 5,
+  checklist: 5,
+  rewrite: 5,
+  timeline: 5,
+  compare: 10,
+  negotiate: 10,
+  ppt: 20,
+  ack: 5,
+  chat: 1
+};
+async function getTokenBalance(userId, token) {
+  const { ok, data } = await sbFetch(
+    `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}&select=balance`,
+    { token }
+  );
+  if (!ok || !Array.isArray(data) || !data.length) return null;
+  return Number(data[0].balance) || 0;
+}
+async function setTokenBalance(userId, newBalance, token) {
+  // Upsert بدون كسر RLS: صف واحد لكل user_id.
+  await sbFetch(
+    `/rest/v1/user_tokens?on_conflict=user_id`,
+    {
+      token,
+      method: 'POST',
+      body: { user_id: userId, balance: Math.max(0, newBalance), last_updated: new Date().toISOString() }
+    }
+  );
+  // في حال كان الصف موجوداً ولم يُدرج (لأن POST قد يفشل بدون Prefer: resolution=merge-duplicates)
+  await sbFetch(
+    `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}`,
+    { token, method: 'PATCH', body: { balance: Math.max(0, newBalance), last_updated: new Date().toISOString() } }
+  );
+}
+
+
+// ---------- Chat history: user-scoped read/write to Supabase ----------
+// جدول chat_messages(user_id uuid, role text, content text, created_at timestamptz)
+// يجب أن يكون RLS مُفعّلاً وأن تسمح السياسات فقط بـ user_id = auth.uid().
+async function loadChatHistoryForUser(userId, token, limit = 40) {
+  if (!userId || !token) return [];
+  const { ok, data } = await sbFetch(
+    `/rest/v1/chat_messages?user_id=eq.${encodeURIComponent(userId)}&select=role,content,created_at&order=created_at.asc&limit=${limit}`,
+    { token }
+  );
+  if (!ok || !Array.isArray(data)) return [];
+  return data.map(r => ({ role: r.role, content: r.content }));
+}
+async function saveChatMessage(userId, token, role, content) {
+  if (!userId || !token || !content) return;
+  try {
+    await sbFetch(`/rest/v1/chat_messages`, {
+      token, method: 'POST',
+      body: { user_id: userId, role, content: String(content).slice(0, 20000) }
+    });
+  } catch (_) {}
+}
+async function clearChatHistoryForUser(userId, token) {
+  if (!userId || !token) return;
+  try {
+    await sbFetch(`/rest/v1/chat_messages?user_id=eq.${encodeURIComponent(userId)}`, {
+      token, method: 'DELETE'
+    });
+  } catch (_) {}
+}
+
+
+// ---------- Handler ----------
+module.exports = async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
+
+  try {
+    const { messages = [], message, file, action, feature, cost } = req.body || {};
+
+    // Auth (needed for history actions & user-scoped persistence)
+    const token = (req.headers['authorization'] || '').replace('Bearer ', '');
+    let profile = null, sbUser = null;
+    if (token) {
+      sbUser = await getUserFromToken(token);
+      if (sbUser) profile = await readTriesLeft(sbUser.id, token);
+    }
+
+    // --- History endpoints: strictly scoped to current user_id ---
+    if (action === 'history') {
+      if (!sbUser) return res.status(200).json({ history: [] });
+      const history = await loadChatHistoryForUser(sbUser.id, token);
+      return res.status(200).json({ history, user_id: sbUser.id });
+    }
+    if (action === 'clear') {
+      if (sbUser) await clearChatHistoryForUser(sbUser.id, token);
+      return res.status(200).json({ ok: true });
+    }
+
+    let msgs = Array.isArray(messages) && messages.length
+      ? messages
+      : (message ? [{ role: 'user', content: String(message) }] : []);
+    if (!msgs.length && !file) return res.status(400).json({ error: 'لا توجد رسالة' });
+    const isFreePlan = !profile || !profile.plan || /مجانية|free/i.test(profile.plan);
+    if (profile && isFreePlan && profile.triesLeft <= 0) {
+      return res.status(200).json({
+        trial_ended: true,
+        reply: 'انتهت محاولاتك المجانية. يرجى الترقية للاستمرار.',
+        tries_left: 0
+      });
+    }
+
+    // ===== Token-based pricing: check balance BEFORE calling the AI =====
+    // تكلفة العملية من الجسم (feature/cost) أو من الجدول الافتراضي، وإلا 1 توكن للمحادثة العادية.
+    let opCost = 0;
+    if (typeof cost === 'number' && cost >= 0) opCost = cost;
+    else if (feature && FEATURE_COSTS[feature] != null) opCost = FEATURE_COSTS[feature];
+    else opCost = FEATURE_COSTS.chat;
+
+    let tokenBalance = null;
+    if (sbUser && opCost > 0) {
+      tokenBalance = await getTokenBalance(sbUser.id, token);
+      if (tokenBalance == null) tokenBalance = 0;
+      if (tokenBalance < opCost) {
+        return res.status(200).json({
+          insufficient_tokens: true,
+          error: 'رصيدك غير كافٍ، يرجى شحن باقة Tokens.',
+          tokens_left: tokenBalance,
+          cost: opCost
+        });
+      }
+    }
+
+    // Attach PDF text to the last user message (بدون عرضه للمستخدم في الواجهة — الواجهة لا تعرض هذا الحقل)
+    if (file && file.type === 'application/pdf') {
+      let pdfText = (file.text && String(file.text).trim()) || '';
+      if (!pdfText && file.base64) pdfText = await extractPdfText(file.base64);
+      if (pdfText && msgs.length) {
+        msgs[msgs.length - 1].content +=
+          `\n\n[محتوى الملف المرفق — للتحليل فقط]\n"""${pdfText}"""`;
+      }
+    }
+
+    // Safety cap
+    let totalLen = msgs.reduce((sum, m) => sum + (m.content || '').length, 0);
+    if (totalLen > 12000) {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === 'user') {
+          msgs[i].content = msgs[i].content.substring(0, 5000) + '\n\n[تم قص النص لطوله]';
+          break;
+        }
+      }
+    }
+
+    if (!GEMINI_KEYS.length && !GROQ_KEYS.length) {
+      return res.status(200).json({ error: 'لم يتم إعداد أي مزوّد ذكاء اصطناعي. الرجاء إضافة مفاتيح API.' });
+    }
+
+    // Try Gemini pool → Groq pool. رسالة واضحة عند الفشل الكامل.
+    let reply = null, lastError = null;
+    if (GEMINI_KEYS.length) {
+      try { reply = await callGeminiRR(msgs); }
+      catch (e) { lastError = e; console.error('[chat] Gemini pool failed:', e.message); }
+    }
+    if (!reply && GROQ_KEYS.length) {
+      try { reply = await callGroqRR(msgs); }
+      catch (e) { lastError = e; console.error('[chat] Groq pool failed:', e.message); }
+    }
+    if (!reply) {
+      return res.status(200).json({
+        error: 'الخدمة مشغولة حالياً. حاول بعد لحظات.',
+        detail: String(lastError?.message || 'unknown'),
+        keys: { gemini: GEMINI_KEYS.length, groq: GROQ_KEYS.length }
+      });
+    }
+
+    // Sanitize (شيل الأحرف الأجنبية والبدايات الممنوعة)
+    reply = sanitizeReply(reply);
+
+    let triesLeft = profile?.triesLeft;
+    if (profile && sbUser && isFreePlan) {
+      triesLeft = await decrementTries(sbUser.id, profile.triesLeft, token);
+    }
+
+    // Persist under the current user_id ONLY — never bleed across accounts.
+    if (sbUser && token) {
+      try {
+        const lastUser = [...msgs].reverse().find(m => m.role === 'user');
+        if (lastUser && lastUser.content) await saveChatMessage(sbUser.id, token, 'user', lastUser.content);
+        if (reply)                        await saveChatMessage(sbUser.id, token, 'assistant', reply);
+      } catch (_) {}
+    }
+
+    // ===== Deduct tokens AFTER successful AI reply =====
+    let tokensLeft = tokenBalance;
+    if (sbUser && opCost > 0 && tokenBalance != null) {
+      tokensLeft = Math.max(0, tokenBalance - opCost);
+      try { await setTokenBalance(sbUser.id, tokensLeft, token); } catch (e) { console.error('[tokens] deduct failed:', e.message); }
+    }
+
+    return res.status(200).json({ reply, tries_left: triesLeft, tokens_left: tokensLeft, cost: opCost, user_id: sbUser ? sbUser.id : null });
+  } catch (err) {
+    console.error('[api/chat] unexpected error:', err);
+    return res.status(200).json({ error: 'خطأ غير متوقع: ' + String(err.message) });
+  }
+};
