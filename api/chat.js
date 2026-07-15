@@ -1,71 +1,7 @@
-// api/chat.js — Uqoodi AI (Token-based billing)
-// ============================================================================
-// SUPABASE SQL — قم بتشغيل هذا في SQL Editor مرة واحدة:
-// ----------------------------------------------------------------------------
-// -- 1) جدول رصيد التوكنات
-// create table if not exists public.user_tokens (
-//   user_id  uuid primary key references auth.users(id) on delete cascade,
-//   tokens   integer not null default 10 check (tokens >= 0),
-//   updated_at timestamptz not null default now()
-// );
-//
-// -- 2) تفعيل RLS
-// alter table public.user_tokens enable row level security;
-//
-// -- 3) السياسات (كل مستخدم يقرأ/يعدّل صفّه فقط)
-// drop policy if exists "read own tokens"  on public.user_tokens;
-// drop policy if exists "insert own tokens" on public.user_tokens;
-// drop policy if exists "update own tokens" on public.user_tokens;
-// create policy "read own tokens"   on public.user_tokens for select using (auth.uid() = user_id);
-// create policy "insert own tokens" on public.user_tokens for insert with check (auth.uid() = user_id);
-// create policy "update own tokens" on public.user_tokens for update using (auth.uid() = user_id);
-//
-// -- 4) Trigger: منح 10 توكنات تلقائياً عند تسجيل مستخدم جديد
-// create or replace function public.handle_new_user_tokens()
-// returns trigger language plpgsql security definer set search_path = public as $$
-// begin
-//   insert into public.user_tokens (user_id, tokens) values (new.id, 10)
-//   on conflict (user_id) do nothing;
-//   return new;
-// end $$;
-//
-// drop trigger if exists on_auth_user_created_tokens on auth.users;
-// create trigger on_auth_user_created_tokens
-//   after insert on auth.users
-//   for each row execute procedure public.handle_new_user_tokens();
-//
-// -- 5) دالة خصم آمنة (يمكن استخدامها من الخادم عبر RPC)
-// create or replace function public.deduct_tokens(p_amount int)
-// returns integer language plpgsql security definer set search_path = public as $$
-// declare _left int;
-// begin
-//   update public.user_tokens
-//     set tokens = tokens - p_amount, updated_at = now()
-//     where user_id = auth.uid() and tokens >= p_amount
-//     returning tokens into _left;
-//   if _left is null then raise exception 'INSUFFICIENT_TOKENS'; end if;
-//   return _left;
-// end $$;
-// ============================================================================
-
-// ---------- Token cost table (يجب أن يطابق الواجهة) ----------
-const TOKEN_COSTS = {
-  chat:          5,   // دردشة عادية
-  risk:          0,   // تحليل المخاطر / الأعلام الحمراء — مجاني دائماً
-  simplify:      15,  // تبسيط العقد / قائمة التحقق
-  rewrite:       15,  // إعادة صياغة احترافية
-  timeline:      15,  // مخطط زمني
-  export_docx:   15,  // تحميل Word
-  compare:       30,  // مقارنة مع السوق
-  negotiate:     30,  // استراتيجية تفاوض
-  ppt:           40,  // توليد عرض تقديمي
-  acknowledge:   15   // إقرار مبدئي (بدون توقيع)
-};
-function costForAction(a, fallback) {
-  if (typeof a === 'number') return Math.max(0, a|0);
-  if (a && Object.prototype.hasOwnProperty.call(TOKEN_COSTS, a)) return TOKEN_COSTS[a];
-  return (typeof fallback === 'number') ? fallback : TOKEN_COSTS.chat;
-}
+// api/chat.js — Uqoodi AI
+// - Round-Robin على عدة مفاتيح Gemini و Groq (GEMINI_API_KEYS / GROQ_API_KEYS بفواصل ، أو المفتاح المفرد القديم)
+// - Guardrails صارمة: SaaS للعقود فقط، رد عربي فصيح، ممنوع البدء بـ "أنا" أو "لقد طلبت مني"، تنظيف الأحرف الأجنبية
+// - رسائل خطأ واضحة بدل الشاشة السوداء
 
 // ---------- Keys (single OR comma-separated for round-robin) ----------
 function parseKeys(single, multi) {
@@ -77,6 +13,7 @@ function parseKeys(single, multi) {
 const GEMINI_KEYS = parseKeys(process.env.GEMINI_API_KEY, process.env.GEMINI_API_KEYS);
 const GROQ_KEYS   = parseKeys(process.env.GROQ_API_KEY,   process.env.GROQ_API_KEYS);
 
+// Round-robin cursor (in-memory per instance)
 let _geminiCursor = 0, _groqCursor = 0;
 function nextKey(pool, cursorRef) {
   if (!pool.length) return null;
@@ -102,60 +39,73 @@ const SYSTEM_PROMPT = `
 
 2) لغة الرد (إلزامي حرفياً — لا استثناء):
    - اكتشف اللغة السائدة في آخر رسالة للمستخدم (وفي أي ملف مرفق). المعيار: إذا احتوت الرسالة/الملف على أي حرف عربي فهي عربية، وإلا فهي إنجليزية.
-   - الرد يجب أن يكون كاملاً بلغة المستخدم بدون أي خلط.
-   - يُسمح فقط بترك الوسوم الهيكلية التالية كما هي بالإنجليزية: === CONTRACT SCORE ===, === END SCORE ===, === RISK ASSESSMENT ===, === END RISK ===, === GCC COMPLIANCE ===, === END GCC ===, OVERALL:, GREEN, YELLOW, RED.
+   - الرد يجب أن يكون كاملاً بلغة المستخدم بدون أي خلط:
+     • إذا كانت الرسالة عربية: كل شيء بالعربية الفصحى بما في ذلك العناوين والملصقات وأسماء الأقسام والتوصيات وشرح المخاطر (مثلاً: "التقييم العام" بدل OVERALL، "أخضر/أصفر/أحمر" بدل GREEN/YELLOW/RED عند الشرح، وأسماء البنود عربية).
+     • إذا كانت الرسالة إنجليزية: كل شيء بالإنجليزية الاحترافية.
+   - يُسمح فقط بترك الوسوم الهيكلية التالية كما هي بالإنجليزية لأنها إشارات نظام للواجهة (لا تترجمها ولا تحذفها): === CONTRACT SCORE ===, === END SCORE ===, === RISK ASSESSMENT ===, === END RISK ===, === GCC COMPLIANCE ===, === END GCC ===, OVERALL:, GREEN, YELLOW, RED. أما بقية الكلمات فبلغة المستخدم.
    - ممنوع الأحرف الصينية/اليابانية/الكورية أو أي رموز أجنبية غريبة.
+   - ممنوع خلط لغتين في نفس الجملة أو نفس القسم إلا لمصطلح قانوني تقني لا مقابل له.
 
 3) أسلوب الرد:
    - ابدأ الرد مباشرة بالمحتوى/التحليل. ممنوع تماماً البدء بـ: "أنا"، "لقد طلبت مني"، "بالتأكيد"، "بكل سرور"، "سأقوم"، "دعني"، "Sure", "Of course", "I'll", "Let me".
    - الرد مباشر، مختصر، منظم بفقرات وعناوين واضحة.
 
 4) حماية الخصوصية (PII):
-   - لا تكرر أبداً أي أرقام هوية، إقامة، جواز، سجل تجاري، رقم ضريبي، آيبان، أو أرقام جوال حقيقية.
+   - لا تكرر أبداً أي أرقام هوية، إقامة، جواز، سجل تجاري، رقم ضريبي، آيبان، أو أرقام جوال حقيقية من المستخدم.
    - استبدلها دائماً في المخرجات بـ: [....................]
+   - في نهاية أي مستند مسحوب: أضف سطر تذكير واحد بلغة المستخدم:
+     • عربي: "ملاحظة أمان: تُركت الحقول الحساسة بأقواس فارغة [....................] — يرجى تعبئتها يدوياً بعد التحميل."
+     • English: "Security note: Sensitive fields left as empty brackets [....................] — please fill them manually after download."
 
-5) قاعدة الاكتفاء: إذا أعطاك المستخدم موجزاً واضحاً، أنجز مباشرة. لا تطلب معلومات إلا إذا نقص عنصر جوهري لا يمكن استنتاجه.
+5) قاعدة الاكتفاء:
+   - إذا أعطاك المستخدم عقداً كاملاً أو موجزاً واضحاً، أنجز مباشرة بدون طلب معلومات إضافية.
+   - إذا نقص حقل بسيط (عملة، مدة قياسية)، استنتجه بصمت وأشر لذلك بسطر واحد في النهاية.
+   - لا تطلب معلومات إلا إذا نقص عنصر جوهري لا يمكن استنتاجه.
 
-6) اتّبع أي توجيه [SYSTEM ...] داخل رسالة المستخدم حرفياً.
+6) اتّبع أي توجيه [SYSTEM ...] داخل رسالة المستخدم حرفياً، مع الحفاظ على قاعدة اللغة (بند 2).
 
-7) عند تحليل عقد أو صياغة مستند، أضف بعد المحتوى وبهذا الترتيب:
+7) عند تحليل عقد أو صياغة مستند، أضف بعد المحتوى وبهذا الترتيب الحرفي (بلغة المستخدم داخل الأسطر، والوسوم كما هي):
 
 === CONTRACT SCORE ===
 {رقم 0-100}%
-الوضوح: {n/10} | القابلية للتنفيذ: {n/10} | التوازن: {n/10}
+{عربي: الوضوح: {رقم/10} | القابلية للتنفيذ: {رقم/10} | التوازن: {رقم/10} — أو — English: Clarity: {n/10} | Enforceability: {n/10} | Balance: {n/10}}
 سطر واحد بلغة المستخدم عن أقوى نقطة ونقطة يجب تحسينها.
 === END SCORE ===
 
 === RISK ASSESSMENT ===
-OVERALL: [GREEN|YELLOW|RED] — جملة موجزة.
-- [GREEN|YELLOW|RED] | (اسم البند): المخاطرة + التوصية.
-- [GREEN|YELLOW|RED] | (اسم البند): المخاطرة + التوصية.
-- [GREEN|YELLOW|RED] | (اسم البند): المخاطرة + التوصية.
+OVERALL: [GREEN|YELLOW|RED] — جملة موجزة بلغة المستخدم.
+- [GREEN|YELLOW|RED] | (اسم البند بلغة المستخدم): المخاطرة + التوصية بلغة المستخدم.
+- [GREEN|YELLOW|RED] | (اسم البند بلغة المستخدم): المخاطرة + التوصية بلغة المستخدم.
+- [GREEN|YELLOW|RED] | (اسم البند بلغة المستخدم): المخاطرة + التوصية بلغة المستخدم.
 === END RISK ===
 
 === GCC COMPLIANCE ===
-- (اسم الدولة) | [GREEN|YELLOW|RED] | مرجع نظامي مختصر.
+- (اسم الدولة بلغة المستخدم) | [GREEN|YELLOW|RED] | مرجع نظامي مختصر بلغة المستخدم.
 === END GCC ===
 
 لا تكتب أي شيء بعد END GCC.
 
 8) في المحادثة العادية (بدون طلب مستند)، رد بأسلوب موجز (2-4 أسطر) بدون أقسام تحليلية.
-
-9) ممنوع منعاً باتاً ذكر أي "توقيع إلكتروني" أو "توقيع رقمي" أو تقديم توقيع مرسوم؛ أي مستند تُصدره هو "إقرار مبدئي" فقط بدون توقيع.
 `.trim();
 
 // ---------- Response Sanitizer ----------
 function sanitizeReply(text) {
   if (!text) return '';
   let t = String(text);
+
+  // 1) شيل الأحرف الصينية/اليابانية/الكورية/رموز غريبة
   t = t.replace(/[\u4e00-\u9fff\u3040-\u30ff\u3400-\u4dbf\uac00-\ud7af]/g, '');
+  // 2) شيل رموز التحكم
   t = t.replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F]/g, '');
+  // 3) شيل السطر الأول لو يبدأ بـ "أنا/لقد طلبت مني/بالتأكيد..."
   const banned = /^\s*(?:\*+\s*)?(?:أنا\b|لقد\s+طلبت\s+مني|طلبت\s+مني|بالتأكيد[!،.]?|بكل\s+سرور|سأقوم\b|دعني\s+|إليك\s+|هذا\s+هو\s+الرد|Sure[!,.]?|Of course[!,.]?|I('|’)ll\b|I\s+will\b|Let me\b|Here\s+is)/i;
   const lines = t.split(/\n/);
   while (lines.length && banned.test(lines[0])) {
     lines.shift();
+    // بعد شيل السطر، شيل الفراغات الأولى
     while (lines.length && !lines[0].trim()) lines.shift();
   }
+  // 4) لو أول جملة داخل نفس السطر بدأت بممنوع، اقطع لأول علامة ترقيم
   if (lines.length && banned.test(lines[0])) {
     lines[0] = lines[0].replace(banned, '').replace(/^[،:\-—.\s]+/, '');
   }
@@ -188,7 +138,7 @@ async function callGeminiOnce(apiKey, messages) {
     lastErr = new Error(`Gemini ${r.status} (${model}): ${errText}`);
     lastErr.status = r.status;
     lastErr.rateLimited = (r.status === 429 || r.status === 503);
-    if (r.status === 400 || r.status === 404) continue;
+    if (r.status === 400 || r.status === 404) continue; // model deprecated → try next
     throw lastErr;
   }
   throw lastErr || new Error('Gemini: all models failed');
@@ -201,10 +151,11 @@ async function callGeminiRR(messages) {
     const { key } = nextKey(GEMINI_KEYS, cursorRef);
     try {
       const out = await callGeminiOnce(key, messages);
-      _geminiCursor = cursorRef.value;
+      _geminiCursor = cursorRef.value; // advance only on success
       return out;
     } catch (e) {
       lastErr = e;
+      // rate-limit / 5xx → جرّب المفتاح التالي. أخطاء أخرى → أوقف الدوران على Gemini.
       if (!e.rateLimited && (e.status && e.status < 500)) break;
     }
   }
@@ -235,7 +186,9 @@ async function callGroqOnce(apiKey, messages) {
     lastErr = new Error(`Groq ${r.status} (${model}): ${errText}`);
     lastErr.status = r.status;
     lastErr.rateLimited = (r.status === 429 || r.status === 503);
+    // model_decommissioned / not_found → try next model on same key
     if (r.status === 400 || r.status === 404) continue;
+    // other errors → stop trying more models on this key, let RR advance to next key
     throw lastErr;
   }
   throw lastErr || new Error('Groq: all models failed');
@@ -271,14 +224,13 @@ async function extractPdfText(base64) {
   } catch (e) { return ''; }
 }
 
-// ---------- Supabase helpers ----------
-async function sbFetch(path, { token, method = 'GET', body, prefer } = {}) {
+// ---------- Supabase helpers (unchanged) ----------
+async function sbFetch(path, { token, method = 'GET', body } = {}) {
   const headers = {
     'apikey': SUPABASE_ANON_KEY,
     'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`,
     'Content-Type': 'application/json'
   };
-  if (prefer) headers['Prefer'] = prefer;
   const r = await fetch(`${SUPABASE_URL}${path}`, {
     method, headers, body: body ? JSON.stringify(body) : undefined
   });
@@ -293,32 +245,26 @@ async function getUserFromToken(token) {
   });
   return r.ok ? await r.json() : null;
 }
-
-// ---------- Token balance read/write (user_tokens) ----------
-async function readTokens(userId, token) {
+async function readTriesLeft(userId, token) {
   const { ok, data } = await sbFetch(
-    `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}&select=tokens`,
+    `/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=tries_left,plan`,
     { token }
   );
-  if (!ok || !Array.isArray(data)) return null;
-  if (!data.length) {
-    // seed with 10 tokens as a safety net (trigger should already have inserted)
-    await sbFetch(`/rest/v1/user_tokens`, {
-      token, method: 'POST',
-      body: { user_id: userId, tokens: 10 },
-      prefer: 'return=minimal,resolution=ignore-duplicates'
-    });
-    return 10;
-  }
-  return data[0].tokens ?? 0;
+  if (!ok || !data || !data.length) return null;
+  return { triesLeft: data[0].tries_left ?? 3, plan: data[0].plan || 'مجانية' };
 }
-async function writeTokens(userId, newValue, token) {
-  await sbFetch(`/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}`, {
-    token, method: 'PATCH', body: { tokens: Math.max(0, newValue|0), updated_at: new Date().toISOString() }
+async function decrementTries(userId, currentTries, token) {
+  const next = Math.max(0, (currentTries || 0) - 1);
+  await sbFetch(`/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
+    token, method: 'PATCH', body: { tries_left: next }
   });
+  return next;
 }
 
-// ---------- Chat history (user-scoped) ----------
+
+// ---------- Chat history: user-scoped read/write to Supabase ----------
+// جدول chat_messages(user_id uuid, role text, content text, created_at timestamptz)
+// يجب أن يكون RLS مُفعّلاً وأن تسمح السياسات فقط بـ user_id = auth.uid().
 async function loadChatHistoryForUser(userId, token, limit = 40) {
   if (!userId || !token) return [];
   const { ok, data } = await sbFetch(
@@ -356,20 +302,17 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { messages = [], message, file, action, cost } = req.body || {};
+    const { messages = [], message, file, action } = req.body || {};
 
+    // Auth (needed for history actions & user-scoped persistence)
     const token = (req.headers['authorization'] || '').replace('Bearer ', '');
-    let sbUser = null;
-    if (token) sbUser = await getUserFromToken(token);
-
-    // Balance query endpoint
-    if (action === 'balance') {
-      if (!sbUser) return res.status(200).json({ tokens_left: 0, auth: false });
-      const bal = await readTokens(sbUser.id, token);
-      return res.status(200).json({ tokens_left: bal ?? 0, auth: true });
+    let profile = null, sbUser = null;
+    if (token) {
+      sbUser = await getUserFromToken(token);
+      if (sbUser) profile = await readTriesLeft(sbUser.id, token);
     }
 
-    // History endpoints
+    // --- History endpoints: strictly scoped to current user_id ---
     if (action === 'history') {
       if (!sbUser) return res.status(200).json({ history: [] });
       const history = await loadChatHistoryForUser(sbUser.id, token);
@@ -384,26 +327,16 @@ module.exports = async (req, res) => {
       ? messages
       : (message ? [{ role: 'user', content: String(message) }] : []);
     if (!msgs.length && !file) return res.status(400).json({ error: 'لا توجد رسالة' });
-
-    // Determine cost (per-request `action` name OR numeric `cost`, default = chat)
-    const chargeAmount = costForAction(typeof cost === 'number' ? cost : action, TOKEN_COSTS.chat);
-
-    // Balance check (skipped for anonymous or free actions)
-    let currentTokens = null;
-    if (sbUser) {
-      currentTokens = await readTokens(sbUser.id, token);
-      if (currentTokens == null) currentTokens = 0;
-      if (chargeAmount > 0 && currentTokens < chargeAmount) {
-        return res.status(200).json({
-          insufficient_tokens: true,
-          tokens_left: currentTokens,
-          required: chargeAmount,
-          reply: 'رصيدك غير كافٍ (' + currentTokens + ' توكن) والعملية تتطلب ' + chargeAmount + '. اشحن من صفحة الأسعار.'
-        });
-      }
+    const isFreePlan = !profile || !profile.plan || /مجانية|free/i.test(profile.plan);
+    if (profile && isFreePlan && profile.triesLeft <= 0) {
+      return res.status(200).json({
+        trial_ended: true,
+        reply: 'انتهت محاولاتك المجانية. يرجى الترقية للاستمرار.',
+        tries_left: 0
+      });
     }
 
-    // Attach PDF text to the last user message
+    // Attach PDF text to the last user message (بدون عرضه للمستخدم في الواجهة — الواجهة لا تعرض هذا الحقل)
     if (file && file.type === 'application/pdf') {
       let pdfText = (file.text && String(file.text).trim()) || '';
       if (!pdfText && file.base64) pdfText = await extractPdfText(file.base64);
@@ -428,7 +361,7 @@ module.exports = async (req, res) => {
       return res.status(200).json({ error: 'لم يتم إعداد أي مزوّد ذكاء اصطناعي. الرجاء إضافة مفاتيح API.' });
     }
 
-    // Try Gemini pool → Groq pool
+    // Try Gemini pool → Groq pool. رسالة واضحة عند الفشل الكامل.
     let reply = null, lastError = null;
     if (GEMINI_KEYS.length) {
       try { reply = await callGeminiRR(msgs); }
@@ -442,20 +375,19 @@ module.exports = async (req, res) => {
       return res.status(200).json({
         error: 'الخدمة مشغولة حالياً. حاول بعد لحظات.',
         detail: String(lastError?.message || 'unknown'),
-        tokens_left: currentTokens
+        keys: { gemini: GEMINI_KEYS.length, groq: GROQ_KEYS.length }
       });
     }
 
+    // Sanitize (شيل الأحرف الأجنبية والبدايات الممنوعة)
     reply = sanitizeReply(reply);
 
-    // Deduct only after a successful reply
-    let tokensLeft = currentTokens;
-    if (sbUser && chargeAmount > 0 && currentTokens != null) {
-      tokensLeft = Math.max(0, currentTokens - chargeAmount);
-      try { await writeTokens(sbUser.id, tokensLeft, token); } catch (_) {}
+    let triesLeft = profile?.triesLeft;
+    if (profile && sbUser && isFreePlan) {
+      triesLeft = await decrementTries(sbUser.id, profile.triesLeft, token);
     }
 
-    // Persist history
+    // Persist under the current user_id ONLY — never bleed across accounts.
     if (sbUser && token) {
       try {
         const lastUser = [...msgs].reverse().find(m => m.role === 'user');
@@ -464,12 +396,7 @@ module.exports = async (req, res) => {
       } catch (_) {}
     }
 
-    return res.status(200).json({
-      reply,
-      tokens_left: tokensLeft,
-      charged: chargeAmount,
-      user_id: sbUser ? sbUser.id : null
-    });
+    return res.status(200).json({ reply, tries_left: triesLeft, user_id: sbUser ? sbUser.id : null });
   } catch (err) {
     console.error('[api/chat] unexpected error:', err);
     return res.status(200).json({ error: 'خطأ غير متوقع: ' + String(err.message) });
