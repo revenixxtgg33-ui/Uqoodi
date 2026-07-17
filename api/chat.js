@@ -261,6 +261,63 @@ async function decrementTries(userId, currentTries, token) {
   return next;
 }
 
+// ---------- Token wallet: user_tokens (id, user_id, balance, last_updated) ----------
+// التكاليف: 5 توكنات للمحادثة العادية، 25 توكن للميزات الذكية (تحليل عقد، صياغة، تدقيق، PDF ...).
+const TOKEN_COST_CHAT  = 5;
+const TOKEN_COST_SMART = 25;
+
+// ميزات ذكية معروفة — أي منها يُحاسَب 25 توكن
+const SMART_ACTIONS = new Set([
+  'analyze', 'analyze_contract', 'contract_analysis',
+  'draft', 'draft_contract', 'generate_contract',
+  'review', 'risk', 'risk_assessment',
+  'compliance', 'gcc_compliance',
+  'quote', 'generate_quote',
+  'smart', 'smart_feature'
+]);
+
+function computeTokenCost({ action, feature, file, messages }) {
+  // أولوية للحقول الصريحة من الواجهة
+  const key = String(feature || action || '').toLowerCase();
+  if (SMART_ACTIONS.has(key)) return TOKEN_COST_SMART;
+  // أي ملف PDF مرفق => ميزة ذكية (تحليل مستند)
+  if (file && (file.type === 'application/pdf' || file.base64 || file.text)) {
+    return TOKEN_COST_SMART;
+  }
+  // كشف تلقائي بسيط: طلب تحليل/صياغة/تدقيق داخل نص الرسالة
+  const lastUser = Array.isArray(messages)
+    ? [...messages].reverse().find(m => m.role === 'user')
+    : null;
+  const text = (lastUser?.content || '').toString().toLowerCase();
+  const smartRe = /(حلل|تحليل|صياغة|صيغ|اصغ|راجع|تدقيق|مخاطر|compliance|analyze|draft|review|risk|contract score)/;
+  if (smartRe.test(text)) return TOKEN_COST_SMART;
+  return TOKEN_COST_CHAT;
+}
+
+async function readTokenBalance(userId, token) {
+  if (!userId) return null;
+  const { ok, data } = await sbFetch(
+    `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}&select=balance,last_updated`,
+    { token }
+  );
+  if (!ok || !Array.isArray(data)) return null;
+  if (!data.length) return { balance: 0, exists: false };
+  return { balance: Number(data[0].balance) || 0, exists: true };
+}
+
+async function updateTokenBalance(userId, token, newBalance) {
+  const body = { balance: newBalance, last_updated: new Date().toISOString() };
+  const { ok, data } = await sbFetch(
+    `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}`,
+    {
+      token,
+      method: 'PATCH',
+      body
+    }
+  );
+  return ok ? newBalance : null;
+}
+
 
 // ---------- Chat history: user-scoped read/write to Supabase ----------
 // جدول chat_messages(user_id uuid, role text, content text, created_at timestamptz)
@@ -336,6 +393,26 @@ module.exports = async (req, res) => {
       });
     }
 
+    // ---------- Token wallet check (user_tokens) ----------
+    // نحسب تكلفة العملية أولاً حتى نستخدم نفس الرقم في الرد
+    const tokenCost = computeTokenCost({
+      action, feature: req.body?.feature, file, messages: msgs
+    });
+    let tokenBalance = null;
+    if (sbUser && token) {
+      const walletInfo = await readTokenBalance(sbUser.id, token);
+      tokenBalance = walletInfo ? walletInfo.balance : null;
+      if (tokenBalance !== null && tokenBalance < tokenCost) {
+        return res.status(200).json({
+          error: 'رصيد التوكنات غير كافٍ',
+          reply: `رصيد التوكنات غير كافٍ. تحتاج ${tokenCost} توكن لهذه العملية ورصيدك الحالي ${tokenBalance}.`,
+          tokens_left: tokenBalance,
+          tokens_required: tokenCost,
+          insufficient_tokens: true
+        });
+      }
+    }
+
     // Attach PDF text to the last user message (بدون عرضه للمستخدم في الواجهة — الواجهة لا تعرض هذا الحقل)
     if (file && file.type === 'application/pdf') {
       let pdfText = (file.text && String(file.text).trim()) || '';
@@ -387,6 +464,14 @@ module.exports = async (req, res) => {
       triesLeft = await decrementTries(sbUser.id, profile.triesLeft, token);
     }
 
+    // ---------- Deduct tokens after a successful reply ----------
+    let tokensLeft = tokenBalance;
+    if (sbUser && token && tokenBalance !== null) {
+      const newBalance = Math.max(0, tokenBalance - tokenCost);
+      const updated = await updateTokenBalance(sbUser.id, token, newBalance);
+      tokensLeft = updated !== null ? updated : tokenBalance;
+    }
+
     // Persist under the current user_id ONLY — never bleed across accounts.
     if (sbUser && token) {
       try {
@@ -396,7 +481,13 @@ module.exports = async (req, res) => {
       } catch (_) {}
     }
 
-    return res.status(200).json({ reply, tries_left: triesLeft, user_id: sbUser ? sbUser.id : null });
+    return res.status(200).json({
+      reply,
+      tries_left: triesLeft,
+      tokens_left: tokensLeft,
+      tokens_cost: tokenCost,
+      user_id: sbUser ? sbUser.id : null
+    });
   } catch (err) {
     console.error('[api/chat] unexpected error:', err);
     return res.status(200).json({ error: 'خطأ غير متوقع: ' + String(err.message) });
