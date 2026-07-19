@@ -1,9 +1,8 @@
-// api/chat.js — Uqoodi AI
-// - Round-Robin على عدة مفاتيح Gemini و Groq (GEMINI_API_KEYS / GROQ_API_KEYS بفواصل ، أو المفتاح المفرد القديم)
-// - Guardrails صارمة: SaaS للعقود فقط، رد عربي فصيح، ممنوع البدء بـ "أنا" أو "لقد طلبت مني"، تنظيف الأحرف الأجنبية
-// - رسائل خطأ واضحة بدل الشاشة السوداء
+// api/chat.js — Safqa Business Assistant (Professional Version)
+// - Round-Robin on Gemini & Groq keys
+// - Zero legal language, zero hashtags, zero self-intro during service requests.
+// - Clean, polished, and business-oriented responses.
 
-// ---------- Keys (single OR comma-separated for round-robin) ----------
 function parseKeys(single, multi) {
   const list = [];
   if (multi) String(multi).split(',').map(s => s.trim()).filter(Boolean).forEach(k => list.push(k));
@@ -13,7 +12,6 @@ function parseKeys(single, multi) {
 const GEMINI_KEYS = parseKeys(process.env.GEMINI_API_KEY, process.env.GEMINI_API_KEYS);
 const GROQ_KEYS   = parseKeys(process.env.GROQ_API_KEY,   process.env.GROQ_API_KEYS);
 
-// Round-robin cursor (in-memory per instance)
 let _geminiCursor = 0, _groqCursor = 0;
 function nextKey(pool, cursorRef) {
   if (!pool.length) return null;
@@ -25,116 +23,78 @@ function nextKey(pool, cursorRef) {
 const SUPABASE_URL       = process.env.SUPABASE_URL       || 'https://jfhoioozzklxvrncjlhk.supabase.co';
 const SUPABASE_ANON_KEY  = process.env.SUPABASE_ANON_KEY  || 'sb_publishable_bcPvrDmn0Eboc3sB2o3mCA_bX7vB5Re';
 
-// ---------- System Prompt (Guardrails) ----------
+// ---------- Professional System Prompt (Safqa) ----------
 const SYSTEM_PROMPT = `
-أنت "عقودي AI" — مساعد SaaS متخصص فقط في تحليل وإنشاء العقود وعروض الأسعار والمستندات التجارية للسوق السعودي والخليجي. أنت أداة مساعدة وليست بديلاً عن محامٍ مرخّص.
+أنت "Safqa"، مستشار تجاري محترف وذكي. تعمل بصمت وبدون ضجيج. أنت لا تستخدم الهاشتاغات ولا تضع توقيعات.
 
-قواعد صارمة يجب الالتزام بها حرفياً:
+قواعد عمل صارمة:
 
-1) نطاق العمل (Guardrails):
-   - ممنوع الرد على أي مواضيع خارج السياق: الطقس، البرمجة، الأخبار، الرياضة، الطبخ، الترفيه، الأسئلة العامة.
-   - إذا سألك المستخدم شيئاً خارج نطاق العقود/المستندات التجارية، اعتذر بجملة قصيرة مهذبة واحدة فقط بنفس لغة رسالته:
-     • عربي: "عذراً، أنا مساعد متخصص في العقود والمستندات التجارية فقط. كيف أساعدك بمستند اليوم؟"
-     • English: "Sorry, I'm specialized in contracts and business documents only. How can I help you with a document today?"
+1) الترحيب والتعريف (فقط عند اللزوم):
+   - إذا أرسل المستخدم تحية عادية (مثل "مرحباً"، "سلام"، "Hi"، "Hello") → رد بجملة واحدة ودية وعرّف بنفسك بإيجاز، ثم اعرض المساعدة.
+   - مثال: "مرحباً! أنا Safqa، مستشارك التجاري الذكي. كيف يمكنني مساعدتك في مشروعك اليوم؟"
+   - إذا طلب المستخدم خدمة تجارية (مثل "أنشئ عرض سعر"، "pricing offer") → ابدأ فوراً بتنفيذ الطلب دون أي تعريف أو مقدمات.
 
-2) لغة الرد (إلزامي حرفياً — لا استثناء):
-   - اكتشف اللغة السائدة في آخر رسالة للمستخدم (وفي أي ملف مرفق). المعيار: إذا احتوت الرسالة/الملف على أي حرف عربي فهي عربية، وإلا فهي إنجليزية.
-   - الرد يجب أن يكون كاملاً بلغة المستخدم بدون أي خلط:
-     • إذا كانت الرسالة عربية: كل شيء بالعربية الفصحى بما في ذلك العناوين والملصقات وأسماء الأقسام والتوصيات وشرح المخاطر (مثلاً: "التقييم العام" بدل OVERALL، "أخضر/أصفر/أحمر" بدل GREEN/YELLOW/RED عند الشرح، وأسماء البنود عربية).
-     • إذا كانت الرسالة إنجليزية: كل شيء بالإنجليزية الاحترافية.
-   - يُسمح فقط بترك الوسوم الهيكلية التالية كما هي بالإنجليزية لأنها إشارات نظام للواجهة (لا تترجمها ولا تحذفها): === CONTRACT SCORE ===, === END SCORE ===, === RISK ASSESSMENT ===, === END RISK ===, === GCC COMPLIANCE ===, === END GCC ===, OVERALL:, GREEN, YELLOW, RED. أما بقية الكلمات فبلغة المستخدم.
-   - ممنوع الأحرف الصينية/اليابانية/الكورية أو أي رموز أجنبية غريبة.
-   - ممنوع خلط لغتين في نفس الجملة أو نفس القسم إلا لمصطلح قانوني تقني لا مقابل له.
+2) لغة الرد:
+   - الرد بلغة المستخدم (عربية فصحى بنبرة سعودية، أو إنجليزية محترفة). لا تخلط اللغتين.
+   - لا تستخدم الهاشتاغات (#) أبداً، ولا رموز زخرفية (مثل ===، ---، ▬، أو أي شيء مشابه).
+   - لا تستخدم أي توقيع في نهاية الرد.
 
-3) أسلوب الرد والتنسيق (إلزامي):
-   - ابدأ الرد مباشرة بالمحتوى/التحليل. ممنوع تماماً البدء بـ: "أنا"، "لقد طلبت مني"، "بالتأكيد"، "بكل سرور"، "سأقوم"، "دعني"، "Sure", "Of course", "I'll", "Let me".
-   - الرد مباشر، مختصر، منظم بفقرات وعناوين واضحة.
-   - ممنوع منعاً باتاً استخدام رموز Markdown الظاهرة في النص: لا تكتب #، ##، ###، ####، ولا **نجمتين**، ولا *نجمة*، ولا ---، ولا === للفصل، ولا رموز زخرفية مثل ▬ ═ ─.
-   - للعناوين: اكتب العنوان في سطر مستقل بلغة المستخدم بدون أي رموز قبل أو بعده (مثال صحيح: "تفاصيل الخطط"، مثال خاطئ: "### تفاصيل الخطط ###").
-   - للتأكيد على كلمة: أعِد صياغة الجملة أو استخدم النقطتين ":" بدل النجوم.
-   - للقوائم: استخدم شرطة واحدة "- " في بداية السطر فقط، أو أرقاماً "1." — بدون رموز إضافية.
-   - للجداول: استخدم صيغة Markdown القياسية بالأعمدة (| ... | ... |) فقط عند الحاجة الفعلية لجدول مقارنة. أي شيء آخر اكتبه نصاً عادياً.
+3) هيكل العروض التجارية (عند الطلب):
+   - العنوان: اكتبه في سطر مستقل دون أي رموز قبله أو بعده.
+   - المحتوى: استخدم القوائم المرقمة أو النقطية (شرطة - أو أرقام)، والجداول عند الحاجة فقط.
+   - لا تضع أي أقسام تحليلية أو تقييمات (مثل CONTRACT SCORE، RISK ASSESSMENT).
+   - تأكد من أن الرد جاهز للقراءة والطباعة.
 
-4) حماية الخصوصية (PII):
-   - لا تكرر أبداً أي أرقام هوية، إقامة، جواز، سجل تجاري، رقم ضريبي، آيبان، أو أرقام جوال حقيقية من المستخدم.
-   - استبدلها دائماً في المخرجات بـ: [....................]
-   - في نهاية أي مستند مسحوب: أضف سطر تذكير واحد بلغة المستخدم:
-     • عربي: "ملاحظة أمان: تُركت الحقول الحساسة بأقواس فارغة [....................] — يرجى تعبئتها يدوياً بعد التحميل."
-     • English: "Security note: Sensitive fields left as empty brackets [....................] — please fill them manually after download."
+4) الحماية:
+   - لا تجب على مواضيع خارج نطاق الأعمال (طقس، رياضة، أخبار، برمجة عامة). رد بجملة واحدة: "عذراً، أنا متخصص في العروض التجارية فقط. كيف أساعدك في مشروعك اليوم؟"
+   - لا تستخدم أي لغة قانونية (عقود، أطراف، محامٍ).
 
-5) قاعدة الاكتفاء:
-   - إذا أعطاك المستخدم عقداً كاملاً أو موجزاً واضحاً، أنجز مباشرة بدون طلب معلومات إضافية.
-   - إذا نقص حقل بسيط (عملة، مدة قياسية)، استنتجه بصمت وأشر لذلك بسطر واحد في النهاية.
-   - لا تطلب معلومات إلا إذا نقص عنصر جوهري لا يمكن استنتاجه.
+5) التنسيق:
+   - الجداول: استخدم صيغة Markdown العادية (| عمود | عمود |).
+   - القوائم: استخدم "-" أو "1.".
+   - النص العريض: استخدم **النص** (لكن لا تضع نجوماً في منتصف الجمل).
+   - لا تضع أي فواصل زخرفية مثل ===، ---، ***.
 
-6) اتّبع أي توجيه [SYSTEM ...] داخل رسالة المستخدم حرفياً، مع الحفاظ على قاعدة اللغة (بند 2).
-
-7) عند تحليل عقد أو صياغة مستند، أضف بعد المحتوى وبهذا الترتيب الحرفي (بلغة المستخدم داخل الأسطر، والوسوم كما هي):
-
-=== CONTRACT SCORE ===
-{رقم 0-100}%
-{عربي: الوضوح: {رقم/10} | القابلية للتنفيذ: {رقم/10} | التوازن: {رقم/10} — أو — English: Clarity: {n/10} | Enforceability: {n/10} | Balance: {n/10}}
-سطر واحد بلغة المستخدم عن أقوى نقطة ونقطة يجب تحسينها.
-=== END SCORE ===
-
-=== RISK ASSESSMENT ===
-OVERALL: [GREEN|YELLOW|RED] — جملة موجزة بلغة المستخدم.
-- [GREEN|YELLOW|RED] | (اسم البند بلغة المستخدم): المخاطرة + التوصية بلغة المستخدم.
-- [GREEN|YELLOW|RED] | (اسم البند بلغة المستخدم): المخاطرة + التوصية بلغة المستخدم.
-- [GREEN|YELLOW|RED] | (اسم البند بلغة المستخدم): المخاطرة + التوصية بلغة المستخدم.
-=== END RISK ===
-
-=== GCC COMPLIANCE ===
-- (اسم الدولة بلغة المستخدم) | [GREEN|YELLOW|RED] | مرجع نظامي مختصر بلغة المستخدم.
-=== END GCC ===
-
-لا تكتب أي شيء بعد END GCC.
-
-8) في المحادثة العادية (بدون طلب مستند)، رد بأسلوب موجز (2-4 أسطر) بدون أقسام تحليلية.
+أنت تقدم قيمة، لا ثرثرة.
 `.trim();
 
-// ---------- Response Sanitizer ----------
+// ---------- Enhanced Sanitizer ----------
 function sanitizeReply(text) {
   if (!text) return '';
   let t = String(text);
 
-  // 1) شيل الأحرف الصينية/اليابانية/الكورية/رموز غريبة
+  // 1) إزالة الأحرف غير المرغوب فيها (صينية، يابانية، كورية، رموز تحكم)
   t = t.replace(/[\u4e00-\u9fff\u3040-\u30ff\u3400-\u4dbf\uac00-\ud7af]/g, '');
-  // 2) شيل رموز التحكم
   t = t.replace(/[\u0000-\u0008\u000B-\u000C\u000E-\u001F]/g, '');
-  // 3) شيل السطر الأول لو يبدأ بـ "أنا/لقد طلبت مني/بالتأكيد..."
-  const banned = /^\s*(?:\*+\s*)?(?:أنا\b|لقد\s+طلبت\s+مني|طلبت\s+مني|بالتأكيد[!،.]?|بكل\s+سرور|سأقوم\b|دعني\s+|إليك\s+|هذا\s+هو\s+الرد|Sure[!,.]?|Of course[!,.]?|I('|’)ll\b|I\s+will\b|Let me\b|Here\s+is)/i;
+
+  // 2) إزالة البدايات الممنوعة
+  const bannedStarts = /^\s*(?:\*+\s*)?(?:أنا\b|لقد\s+طلبت\s+مني|طلبت\s+مني|بالتأكيد[!،.]?|بكل\s+سرور|سأقوم\b|دعني\s+|إليك\s+|هذا\s+هو\s+الرد|Sure[!,.]?|Of course[!,.]?|I('|’)ll\b|I\s+will\b|Let me\b|Here\s+is)/i;
   const lines = t.split(/\n/);
-  while (lines.length && banned.test(lines[0])) {
+  while (lines.length && bannedStarts.test(lines[0])) {
     lines.shift();
     while (lines.length && !lines[0].trim()) lines.shift();
   }
-  if (lines.length && banned.test(lines[0])) {
-    lines[0] = lines[0].replace(banned, '').replace(/^[،:\-—.\s]+/, '');
+  if (lines.length && bannedStarts.test(lines[0])) {
+    lines[0] = lines[0].replace(bannedStarts, '').replace(/^[،:\-—.\s]+/, '');
   }
   t = lines.join('\n').trim();
 
-  // 4) تنظيف رموز Markdown المرئية الزائدة (تحافظ على بنية الجدول والقوائم)
-  // - احذف "###" و "##" و "#" من بداية أي سطر عنوان مع إبقاء نص العنوان
-  t = t.replace(/^[ \t]*#{1,6}[ \t]+/gm, '');
-  // - احذف "###" في نهاية السطر (RTL artifact)
-  t = t.replace(/[ \t]+#{1,6}[ \t]*$/gm, '');
-  // - احذف أسطر الفواصل الطويلة مثل === أو --- أو ___
-  t = t.replace(/^[ \t]*[=\-_]{3,}[ \t]*$/gm, '');
-  // - احذف علامات ** حول النص وأبقِ النص (النص سيظهر بارزًا في الواجهة عبر <strong>)
-  //   نتركها فعلياً كي تعالجها الواجهة كـ Markdown، لكن نزيل الحالات الفارغة **   **
+  // 3) إزالة الهاشتاغات وأسطر الفواصل الزخرفية
+  t = t.replace(/^[ \t]*#{1,6}[ \t]+/gm, '');           // إزالة # من بداية السطر
+  t = t.replace(/[ \t]+#{1,6}[ \t]*$/gm, '');           // إزالة # من نهاية السطر
+  t = t.replace(/^[ \t]*[=\-_]{3,}[ \t]*$/gm, '');       // إزالة === أو --- أو ___
+  t = t.replace(/[▬═─━]{2,}/g, '');                      // إزالة رموز زخرفية
+
+  // 4) تنظيف النجمة المزدوجة الفارغة (تترك **كلمة** للعريض)
   t = t.replace(/\*\*\s*\*\*/g, '');
-  // - إزالة النجوم المفردة "• *" أو "* " الشاذة في بداية السطر عندما لا تشكل قائمة (نتركها كقائمة إذا تلاها فراغ ونص)
-  //   لا نلمس "- " أو "1." — الواجهة تحوّلها لقائمة نظيفة.
-  // - إزالة الرموز الزخرفية النادرة
-  t = t.replace(/[▬═─━]{2,}/g, '');
-  // - تنظيف أسطر فارغة متتالية (لا نسمح بأكثر من فراغين)
+
+  // 5) تنظيف الفراغات المتكررة
   t = t.replace(/\n{3,}/g, '\n\n');
 
   return t.trim();
 }
 
-// ---------- Gemini call with round-robin + retry ----------
+// ---------- Gemini & Groq calls (unchanged logic) ----------
 const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash'];
 async function callGeminiOnce(apiKey, messages) {
   const contents = messages
@@ -160,7 +120,7 @@ async function callGeminiOnce(apiKey, messages) {
     lastErr = new Error(`Gemini ${r.status} (${model}): ${errText}`);
     lastErr.status = r.status;
     lastErr.rateLimited = (r.status === 429 || r.status === 503);
-    if (r.status === 400 || r.status === 404) continue; // model deprecated → try next
+    if (r.status === 400 || r.status === 404) continue;
     throw lastErr;
   }
   throw lastErr || new Error('Gemini: all models failed');
@@ -173,18 +133,16 @@ async function callGeminiRR(messages) {
     const { key } = nextKey(GEMINI_KEYS, cursorRef);
     try {
       const out = await callGeminiOnce(key, messages);
-      _geminiCursor = cursorRef.value; // advance only on success
+      _geminiCursor = cursorRef.value;
       return out;
     } catch (e) {
       lastErr = e;
-      // rate-limit / 5xx → جرّب المفتاح التالي. أخطاء أخرى → أوقف الدوران على Gemini.
       if (!e.rateLimited && (e.status && e.status < 500)) break;
     }
   }
   throw lastErr || new Error('Gemini pool exhausted');
 }
 
-// ---------- Groq call with round-robin ----------
 const GROQ_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama3-70b-8192'];
 async function callGroqOnce(apiKey, messages) {
   const trimmed = messages.slice(-6);
@@ -208,9 +166,7 @@ async function callGroqOnce(apiKey, messages) {
     lastErr = new Error(`Groq ${r.status} (${model}): ${errText}`);
     lastErr.status = r.status;
     lastErr.rateLimited = (r.status === 429 || r.status === 503);
-    // model_decommissioned / not_found → try next model on same key
     if (r.status === 400 || r.status === 404) continue;
-    // other errors → stop trying more models on this key, let RR advance to next key
     throw lastErr;
   }
   throw lastErr || new Error('Groq: all models failed');
@@ -283,12 +239,9 @@ async function decrementTries(userId, currentTries, token) {
   return next;
 }
 
-// ---------- Token wallet: user_tokens (id, user_id, balance, last_updated) ----------
-// التكاليف: 5 توكنات للمحادثة العادية، 25 توكن للميزات الذكية (تحليل عقد، صياغة، تدقيق، PDF ...).
+// ---------- Token wallet (unchanged) ----------
 const TOKEN_COST_CHAT  = 5;
 const TOKEN_COST_SMART = 25;
-
-// ميزات ذكية معروفة — أي منها يُحاسَب 25 توكن
 const SMART_ACTIONS = new Set([
   'analyze', 'analyze_contract', 'contract_analysis',
   'draft', 'draft_contract', 'generate_contract',
@@ -297,25 +250,16 @@ const SMART_ACTIONS = new Set([
   'quote', 'generate_quote',
   'smart', 'smart_feature'
 ]);
-
 function computeTokenCost({ action, feature, file, messages }) {
-  // أولوية للحقول الصريحة من الواجهة
   const key = String(feature || action || '').toLowerCase();
   if (SMART_ACTIONS.has(key)) return TOKEN_COST_SMART;
-  // أي ملف PDF مرفق => ميزة ذكية (تحليل مستند)
-  if (file && (file.type === 'application/pdf' || file.base64 || file.text)) {
-    return TOKEN_COST_SMART;
-  }
-  // كشف تلقائي بسيط: طلب تحليل/صياغة/تدقيق داخل نص الرسالة
-  const lastUser = Array.isArray(messages)
-    ? [...messages].reverse().find(m => m.role === 'user')
-    : null;
+  if (file && (file.type === 'application/pdf' || file.base64 || file.text)) return TOKEN_COST_SMART;
+  const lastUser = Array.isArray(messages) ? [...messages].reverse().find(m => m.role === 'user') : null;
   const text = (lastUser?.content || '').toString().toLowerCase();
   const smartRe = /(حلل|تحليل|صياغة|صيغ|اصغ|راجع|تدقيق|مخاطر|compliance|analyze|draft|review|risk|contract score)/;
   if (smartRe.test(text)) return TOKEN_COST_SMART;
   return TOKEN_COST_CHAT;
 }
-
 async function readTokenBalance(userId, token) {
   if (!userId) return null;
   const { ok, data } = await sbFetch(
@@ -326,24 +270,16 @@ async function readTokenBalance(userId, token) {
   if (!data.length) return { balance: 0, exists: false };
   return { balance: Number(data[0].balance) || 0, exists: true };
 }
-
 async function updateTokenBalance(userId, token, newBalance) {
   const body = { balance: newBalance, last_updated: new Date().toISOString() };
   const { ok, data } = await sbFetch(
     `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}`,
-    {
-      token,
-      method: 'PATCH',
-      body
-    }
+    { token, method: 'PATCH', body }
   );
   return ok ? newBalance : null;
 }
 
-
-// ---------- Chat history: user-scoped read/write to Supabase ----------
-// جدول chat_messages(user_id uuid, role text, content text, created_at timestamptz)
-// يجب أن يكون RLS مُفعّلاً وأن تسمح السياسات فقط بـ user_id = auth.uid().
+// ---------- Chat history (unchanged) ----------
 async function loadChatHistoryForUser(userId, token, limit = 40) {
   if (!userId || !token) return [];
   const { ok, data } = await sbFetch(
@@ -371,19 +307,17 @@ async function clearChatHistoryForUser(userId, token) {
   } catch (_) {}
 }
 
-// ---------- Handler ----------
+// ---------- Main Handler ----------
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.setHeader('Access-Control-Max-Age', '86400');
   if (req.method === 'OPTIONS') return res.status(204).end();
-  if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
     const { messages = [], message, file, action } = req.body || {};
-
-    // Auth (needed for history actions & user-scoped persistence)
     const token = (req.headers['authorization'] || '').replace('Bearer ', '');
     let profile = null, sbUser = null;
     if (token) {
@@ -391,7 +325,6 @@ module.exports = async (req, res) => {
       if (sbUser) profile = await readTriesLeft(sbUser.id, token);
     }
 
-    // --- History endpoints: strictly scoped to current user_id ---
     if (action === 'history') {
       if (!sbUser) return res.status(200).json({ history: [] });
       const history = await loadChatHistoryForUser(sbUser.id, token);
@@ -402,9 +335,7 @@ module.exports = async (req, res) => {
       return res.status(200).json({ ok: true });
     }
 
-    let msgs = Array.isArray(messages) && messages.length
-      ? messages
-      : (message ? [{ role: 'user', content: String(message) }] : []);
+    let msgs = Array.isArray(messages) && messages.length ? messages : (message ? [{ role: 'user', content: String(message) }] : []);
     if (!msgs.length && !file) return res.status(400).json({ error: 'لا توجد رسالة' });
     const isFreePlan = !profile || !profile.plan || /مجانية|free/i.test(profile.plan);
     if (profile && isFreePlan && profile.triesLeft <= 0) {
@@ -415,11 +346,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    // ---------- Token wallet check (user_tokens) ----------
-    // نحسب تكلفة العملية أولاً حتى نستخدم نفس الرقم في الرد
-    const tokenCost = computeTokenCost({
-      action, feature: req.body?.feature, file, messages: msgs
-    });
+    const tokenCost = computeTokenCost({ action, feature: req.body?.feature, file, messages: msgs });
     let tokenBalance = null;
     if (sbUser && token) {
       const walletInfo = await readTokenBalance(sbUser.id, token);
@@ -435,17 +362,14 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Attach PDF text to the last user message (بدون عرضه للمستخدم في الواجهة — الواجهة لا تعرض هذا الحقل)
     if (file && file.type === 'application/pdf') {
       let pdfText = (file.text && String(file.text).trim()) || '';
       if (!pdfText && file.base64) pdfText = await extractPdfText(file.base64);
       if (pdfText && msgs.length) {
-        msgs[msgs.length - 1].content +=
-          `\n\n[محتوى الملف المرفق — للتحليل فقط]\n"""${pdfText}"""`;
+        msgs[msgs.length - 1].content += `\n\n[محتوى الملف المرفق — للتحليل فقط]\n"""${pdfText}"""`;
       }
     }
 
-    // Safety cap
     let totalLen = msgs.reduce((sum, m) => sum + (m.content || '').length, 0);
     if (totalLen > 12000) {
       for (let i = msgs.length - 1; i >= 0; i--) {
@@ -460,7 +384,6 @@ module.exports = async (req, res) => {
       return res.status(200).json({ error: 'لم يتم إعداد أي مزوّد ذكاء اصطناعي. الرجاء إضافة مفاتيح API.' });
     }
 
-    // Try Gemini pool → Groq pool. رسالة واضحة عند الفشل الكامل.
     let reply = null, lastError = null;
     if (GEMINI_KEYS.length) {
       try { reply = await callGeminiRR(msgs); }
@@ -478,7 +401,6 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Sanitize (شيل الأحرف الأجنبية والبدايات الممنوعة)
     reply = sanitizeReply(reply);
 
     let triesLeft = profile?.triesLeft;
@@ -486,7 +408,6 @@ module.exports = async (req, res) => {
       triesLeft = await decrementTries(sbUser.id, profile.triesLeft, token);
     }
 
-    // ---------- Deduct tokens after a successful reply ----------
     let tokensLeft = tokenBalance;
     if (sbUser && token && tokenBalance !== null) {
       const newBalance = Math.max(0, tokenBalance - tokenCost);
@@ -494,12 +415,11 @@ module.exports = async (req, res) => {
       tokensLeft = updated !== null ? updated : tokenBalance;
     }
 
-    // Persist under the current user_id ONLY — never bleed across accounts.
     if (sbUser && token) {
       try {
         const lastUser = [...msgs].reverse().find(m => m.role === 'user');
         if (lastUser && lastUser.content) await saveChatMessage(sbUser.id, token, 'user', lastUser.content);
-        if (reply)                        await saveChatMessage(sbUser.id, token, 'assistant', reply);
+        if (reply) await saveChatMessage(sbUser.id, token, 'assistant', reply);
       } catch (_) {}
     }
 
