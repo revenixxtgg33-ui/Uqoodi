@@ -27,7 +27,19 @@ const SUPABASE_ANON_KEY  = process.env.SUPABASE_ANON_KEY  || 'sb_publishable_bcP
 
 // ---------- System Prompt (Guardrails) ----------
 const SYSTEM_PROMPT = `
-أنت "وثيق AI" — مساعد SaaS متخصص فقط في تحليل وإنشاء العقود وعروض الأسعار والمستندات التجارية للسوق السعودي والخليجي. أنت أداة مساعدة وليست بديلاً عن محامٍ مرخّص.
+أنت "وثيق AI" — مساعد SaaS متخصص في تحليل وإنشاء وتحسين العقود وعروض الأسعار والمقترحات والمستندات التجارية للسوق السعودي والخليجي. أنت أداة مساعدة وليست بديلاً عن محامٍ مرخّص.
+
+إذا أرفق المستخدم ملفاً (PDF أو Word أو صورة) يحتوي على عرض سعر أو مقترح أو عقد أو فاتورة أو اتفاقية أو أي مستند تجاري/قانوني، فاعتبره داخل نطاقك حتى لو لم يشرح المستخدم طلبه بالتفصيل. المسلك الافتراضي: اقرأ الملف المرفق، حسّن صياغته، صحّح أخطاءه، وأخرج نسخة محسّنة احترافية للمستخدم بلغة الملف.
+
+فحص نطاق الملف المرفق (إلزامي قبل أي رد):
+   - قبل أن تبدأ بمعالجة أي ملف مرفق، افحص محتواه أولاً وحدد نوعه.
+   - داخل النطاق فقط: العقود، الاتفاقيات، عروض الأسعار، المقترحات (Proposals)، خطابات النوايا (LOI/MOU)، كراسات الشروط (RFP/RFQ)، الفواتير التجارية، السجلات التجارية، الشروط والأحكام، سياسات الخصوصية/الاستخدام، مستندات المناقصات، والمستندات التجارية والقانونية المشابهة.
+   - خارج النطاق (يجب الرفض): السير الذاتية (CV/Resume)، المقالات، الأبحاث العلمية والأكاديمية، الكتب، الروايات، الشعر، الوصفات، الوظائف المدرسية، أكواد البرمجة، الصور الشخصية، لقطات الشاشة العامة، الفواتير الشخصية، الإيصالات الشخصية، المستندات الطبية، وأي محتوى لا يمت للعقود أو المستندات التجارية بصلة.
+   - إذا كان الملف خارج النطاق: ارفض بأدب برسالة واحدة قصيرة فقط بلغة رسالة المستخدم، ولا تحلل الملف ولا تلخّصه ولا تحسّنه ولا تُخرج أي جزء من محتواه:
+     • عربي: "عذراً، هذا الملف خارج نطاق خدمتي. أنا متخصص فقط في العقود وعروض الأسعار والمستندات التجارية. يسعدني مساعدتك إن أرسلت ملفاً من هذا النوع."
+     • English: "Sorry, this file is outside my service scope. I only handle contracts, proposals, and business documents. Please share a document of that type and I'll gladly help."
+   - إذا كان الملف مختلطاً (يحتوي جزءاً تجارياً وأجزاء أخرى)، عالج الجزء التجاري فقط وتجاهل الباقي، ونبّه المستخدم بسطر واحد.
+   - لا ترفض ملفاً داخل النطاق بحجة أنه "خارج النطاق". الرفض فقط للملفات التي لا علاقة لها فعلاً بالعقود/المستندات التجارية.
 
 قواعد صارمة يجب الالتزام بها حرفياً:
 
@@ -144,11 +156,23 @@ function sanitizeReply(text) {
 
 // ---------- Gemini call with round-robin + retry ----------
 const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash'];
-async function callGeminiOnce(apiKey, messages) {
+async function callGeminiOnce(apiKey, messages, file) {
   const contents = messages
     .filter(m => m.role !== 'system')
     .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user',
                  parts: [{ text: String(m.content) }] }));
+  // Attach the uploaded file (PDF / DOCX / image) natively to the last user turn
+  // so Gemini can read it directly without relying on pdf-parse.
+  if (file && file.base64 && file.type && contents.length) {
+    const supported = /^(application\/pdf|image\/(png|jpe?g|webp|heic|heif)|application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document|application\/msword|text\/plain)$/i;
+    const mime = supported.test(file.type) ? file.type : 'application/pdf';
+    for (let i = contents.length - 1; i >= 0; i--) {
+      if (contents[i].role === 'user') {
+        contents[i].parts.unshift({ inlineData: { mimeType: mime, data: String(file.base64) } });
+        break;
+      }
+    }
+  }
   const body = {
     system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
     contents,
@@ -173,14 +197,14 @@ async function callGeminiOnce(apiKey, messages) {
   }
   throw lastErr || new Error('Gemini: all models failed');
 }
-async function callGeminiRR(messages) {
+async function callGeminiRR(messages, file) {
   if (!GEMINI_KEYS.length) throw new Error('No Gemini keys configured');
   let lastErr = null;
   const cursorRef = { value: _geminiCursor };
   for (let i = 0; i < GEMINI_KEYS.length; i++) {
     const { key } = nextKey(GEMINI_KEYS, cursorRef);
     try {
-      const out = await callGeminiOnce(key, messages);
+      const out = await callGeminiOnce(key, messages, file);
       _geminiCursor = cursorRef.value; // advance only on success
       return out;
     } catch (e) {
@@ -484,13 +508,24 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Attach PDF text to the last user message (بدون عرضه للمستخدم في الواجهة — الواجهة لا تعرض هذا الحقل)
-    if (file && file.type === 'application/pdf') {
-      let pdfText = (file.text && String(file.text).trim()) || '';
-      if (!pdfText && file.base64) pdfText = await extractPdfText(file.base64);
-      if (pdfText && msgs.length) {
+    // Attach file text to the last user message as a fallback for text-only providers (Groq).
+    // Gemini reads the file natively via inlineData in callGeminiOnce.
+    if (file && msgs.length) {
+      let extracted = (file.text && String(file.text).trim()) || '';
+      if (!extracted && file.type === 'application/pdf' && file.base64) {
+        extracted = await extractPdfText(file.base64);
+      }
+      const hint = file.name ? ` (${file.name})` : '';
+      if (extracted) {
         msgs[msgs.length - 1].content +=
-          `\n\n[محتوى الملف المرفق — للتحليل فقط]\n"""${pdfText}"""`;
+          `\n\n[محتوى الملف المرفق${hint} — للتحليل والتحسين]\n"""${extracted}"""`;
+      } else if (file.base64 && !GEMINI_KEYS.length) {
+        // No text + no Gemini available → tell the user briefly.
+        msgs[msgs.length - 1].content +=
+          `\n\n[تنبيه: تم إرفاق ملف${hint} لكن تعذّر استخراج نصه في هذه الجلسة.]`;
+      } else if (file.base64) {
+        msgs[msgs.length - 1].content +=
+          `\n\n[مرفق ملف${hint} — اقرأه من المرفق الأصلي وحسّن صياغته أو حلّله حسب طلب المستخدم.]`;
       }
     }
 
@@ -512,7 +547,7 @@ module.exports = async (req, res) => {
     // Try Gemini pool → Groq pool. رسالة واضحة عند الفشل الكامل.
     let reply = null, lastError = null;
     if (GEMINI_KEYS.length) {
-      try { reply = await callGeminiRR(msgs); }
+      try { reply = await callGeminiRR(msgs, file); }
       catch (e) { lastError = e; console.error('[chat] Gemini pool failed:', e.message); }
     }
     if (!reply && GROQ_KEYS.length) {
