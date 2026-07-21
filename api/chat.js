@@ -1,7 +1,4 @@
-// api/chat.js — Watheeq AI (Business Proposals & Quotes Assistant)
-// - Round-Robin على عدة مفاتيح Gemini و Groq
-// - Guardrails صارمة: SaaS للعروض التجارية والمقترحات فقط.
-// - Smart Features: Smart Pricing, Negotiation Coach, Competitor Analyzer.
+// api/chat.js — Watheeq AI (النسخة التي تقرأ الملفات فوراً ولا تسأل)
 
 function parseKeys(single, multi) {
   const list = [];
@@ -23,34 +20,22 @@ function nextKey(pool, cursorRef) {
 const SUPABASE_URL       = process.env.SUPABASE_URL       || 'https://jfhoioozzklxvrncjlhk.supabase.co';
 const SUPABASE_ANON_KEY  = process.env.SUPABASE_ANON_KEY  || 'sb_publishable_bcPvrDmn0Eboc3sB2o3mCA_bX7vB5Re';
 
-// ---------- Professional System Prompt (Watheeq) ----------
+// ---------- System Prompt (يقرأ الملفات فوراً) ----------
 const SYSTEM_PROMPT = `
-أنت "وثيق" — مستشار تجاري ذكي، مصمم لمساعدة الفريلانسرز والوكالات السعودية في صياغة عروض أسعار ومقترحات مشاريع تجارية احترافية ومقنعة. أنت أداة مساعدة لتحسين العروض التجارية، ولست بديلاً عن المستشار المالي أو القانوني.
+أنت "وثيق" — مستشار تجاري ذكي، مصمم لمساعدة الفريلانسرز والوكالات السعودية في صياغة عروض أسعار ومقترحات مشاريع تجارية.
 
-قواعد صارمة يجب الالتزام بها حرفياً:
+قاعدة ذهبية صارمة جداً (يجب الالتزام بها حرفياً):
+- **إذا أرفق المستخدم أي ملف (PDF، Word، صورة)، يجب أن تقرأ محتوى الملف وتحلله فوراً دون طلب أي تفاصيل إضافية.**
+- **لا تسأل المستخدم عن أي شيء.** ابدأ بالتحليل والتحسين فوراً.
+- إذا كان الملف يحتوي على عرض سعر أو مقترح تجاري، قم بتحسينه وتقديم نسخة محسّنة مع تعليقاتك.
 
-1) الترحيب والتعريف (فقط عند اللزوم):
-   - إذا أرسل المستخدم تحية عادية (مثل "مرحباً"، "سلام"، "Hi", "Hello") → رد بجملة واحدة ودية وعرّف بنفسك بإيجاز، ثم اعرض المساعدة.
-   - مثال: "مرحباً! أنا وثيق، مستشارك التجاري الذكي. كيف يمكنني مساعدتك في مشروعك اليوم؟"
-   - إذا طلب المستخدم خدمة تجارية → ابدأ فوراً بتنفيذ الطلب دون أي تعريف أو مقدمات.
-
-2) لغة الرد:
-   - الرد بلغة المستخدم (عربية فصحى بنبرة تجارية سعودية، أو إنجليزية محترفة). لا تخلط اللغتين.
-   - لا تستخدم الهاشتاغات (#) أبداً، ولا رموز زخرفية (مثل ===، ---، ▬).
-
-3) نطاق العمل:
-   - إذا أرفق المستخدم ملفاً (PDF، Word، صورة) يحتوي على عرض سعر أو مقترح تجاري، اقرأه وحسّنه.
-   - إذا كان الملف خارج النطاق (سيرة ذاتية، مقال، أكاديمي) → اعتذر بلطف.
-
-4) حماية الخصوصية (PII):
-   - لا تكرر أبداً أي أرقام هوية، سجل تجاري، آيبان. استبدلها بـ [....................]
-
-5) التنسيق:
-   - الجداول والقوائم: استخدم صيغة Markdown العادية.
-   - لا تضع أي فواصل زخرفية (===، ---) أو هاشتاغات.
+قواعد إضافية:
+1) الترحيب: إذا أرسل المستخدم تحية فقط، رد بجملة واحدة وعرّف بنفسك.
+2) اللغة: رد بلغة المستخدم. لا تستخدم هاشتاغات ولا رموز زخرفية.
+3) التنسيق: استخدم القوائم والجداول. لا تضع أقسام تحليلية.
 `.trim();
 
-// ---------- Response Sanitizer ----------
+// ---------- Sanitizer ----------
 function sanitizeReply(text) {
   if (!text) return '';
   let t = String(text);
@@ -78,13 +63,10 @@ function sanitizeReply(text) {
   return t.trim();
 }
 
-// ---------- Gemini & Groq calls ----------
+// ---------- Gemini & Groq calls (بقية الكود لم يتغير) ----------
 const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-flash'];
 async function callGeminiOnce(apiKey, messages, file) {
-  const contents = messages
-    .filter(m => m.role !== 'system')
-    .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user',
-                 parts: [{ text: String(m.content) }] }));
+  const contents = messages.filter(m => m.role !== 'system').map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: String(m.content) }] }));
   if (file && file.base64 && file.type && contents.length) {
     const supported = /^(application\/pdf|image\/(png|jpe?g|webp|heic|heif)|application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document|application\/msword|text\/plain)$/i;
     const mime = supported.test(file.type) ? file.type : 'application/pdf';
@@ -95,17 +77,10 @@ async function callGeminiOnce(apiKey, messages, file) {
       }
     }
   }
-  const body = {
-    system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents,
-    generationConfig: { temperature: 0.55, maxOutputTokens: 4096 }
-  };
+  const body = { system_instruction: { parts: [{ text: SYSTEM_PROMPT }] }, contents, generationConfig: { temperature: 0.55, maxOutputTokens: 4096 } };
   let lastErr = null;
   for (const model of GEMINI_MODELS) {
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-    );
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (r.ok) {
       const j = await r.json();
       return (j?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '').trim();
@@ -142,16 +117,7 @@ async function callGroqOnce(apiKey, messages) {
   const trimmed = messages.slice(-6);
   let lastErr = null;
   for (const model of GROQ_MODELS) {
-    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        temperature: 0.55,
-        max_tokens: 4096,
-        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...trimmed]
-      })
-    });
+    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }, body: JSON.stringify({ model, temperature: 0.55, max_tokens: 4096, messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...trimmed] }) });
     if (r.ok) {
       const j = await r.json();
       return (j?.choices?.[0]?.message?.content || '').trim();
@@ -198,38 +164,25 @@ async function extractPdfText(base64) {
 
 // ---------- Supabase helpers ----------
 async function sbFetch(path, { token, method = 'GET', body } = {}) {
-  const headers = {
-    'apikey': SUPABASE_ANON_KEY,
-    'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`,
-    'Content-Type': 'application/json'
-  };
-  const r = await fetch(`${SUPABASE_URL}${path}`, {
-    method, headers, body: body ? JSON.stringify(body) : undefined
-  });
+  const headers = { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' };
+  const r = await fetch(`${SUPABASE_URL}${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const text = await r.text(); let json = null;
   try { json = JSON.parse(text); } catch (_) {}
   return { ok: r.ok, status: r.status, data: json };
 }
 async function getUserFromToken(token) {
   if (!token) return null;
-  const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-    headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${token}` }
-  });
+  const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${token}` } });
   return r.ok ? await r.json() : null;
 }
 async function readTriesLeft(userId, token) {
-  const { ok, data } = await sbFetch(
-    `/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=tries_left,plan`,
-    { token }
-  );
+  const { ok, data } = await sbFetch(`/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}&select=tries_left,plan`, { token });
   if (!ok || !data || !data.length) return null;
   return { triesLeft: data[0].tries_left ?? 3, plan: data[0].plan || 'مجانية' };
 }
 async function decrementTries(userId, currentTries, token) {
   const next = Math.max(0, (currentTries || 0) - 1);
-  await sbFetch(`/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
-    token, method: 'PATCH', body: { tries_left: next }
-  });
+  await sbFetch(`/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, { token, method: 'PATCH', body: { tries_left: next } });
   return next;
 }
 
@@ -237,9 +190,7 @@ async function decrementTries(userId, currentTries, token) {
 const TOKEN_COST_CHAT  = 5;
 const TOKEN_COST_SMART = 25;
 
-const SMART_ACTIONS = new Set([
-  'smart_pricing', 'negotiation', 'competitor_analysis', 'proposal'
-]);
+const SMART_ACTIONS = new Set([ 'smart_pricing', 'negotiation', 'competitor_analysis', 'proposal' ]);
 
 function computeTokenCost({ action, feature, file, messages }) {
   const key = String(feature || action || '').toLowerCase();
@@ -254,48 +205,34 @@ function computeTokenCost({ action, feature, file, messages }) {
 
 async function readTokenBalance(userId, token) {
   if (!userId) return null;
-  const { ok, data } = await sbFetch(
-    `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}&select=balance,last_updated`,
-    { token }
-  );
+  const { ok, data } = await sbFetch(`/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}&select=balance,last_updated`, { token });
   if (!ok || !Array.isArray(data)) return null;
   if (!data.length) return { balance: 0, exists: false };
   return { balance: Number(data[0].balance) || 0, exists: true };
 }
 async function updateTokenBalance(userId, token, newBalance) {
   const body = { balance: newBalance, last_updated: new Date().toISOString() };
-  const { ok, data } = await sbFetch(
-    `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}`,
-    { token, method: 'PATCH', body }
-  );
+  const { ok, data } = await sbFetch(`/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}`, { token, method: 'PATCH', body });
   return ok ? newBalance : null;
 }
 
 // ---------- Chat history ----------
 async function loadChatHistoryForUser(userId, token, limit = 40) {
   if (!userId || !token) return [];
-  const { ok, data } = await sbFetch(
-    `/rest/v1/chat_messages?user_id=eq.${encodeURIComponent(userId)}&select=role,content,created_at&order=created_at.asc&limit=${limit}`,
-    { token }
-  );
+  const { ok, data } = await sbFetch(`/rest/v1/chat_messages?user_id=eq.${encodeURIComponent(userId)}&select=role,content,created_at&order=created_at.asc&limit=${limit}`, { token });
   if (!ok || !Array.isArray(data)) return [];
   return data.map(r => ({ role: r.role, content: r.content }));
 }
 async function saveChatMessage(userId, token, role, content) {
   if (!userId || !token || !content) return;
   try {
-    await sbFetch(`/rest/v1/chat_messages`, {
-      token, method: 'POST',
-      body: { user_id: userId, role, content: String(content).slice(0, 20000) }
-    });
+    await sbFetch(`/rest/v1/chat_messages`, { token, method: 'POST', body: { user_id: userId, role, content: String(content).slice(0, 20000) } });
   } catch (_) {}
 }
 async function clearChatHistoryForUser(userId, token) {
   if (!userId || !token) return;
   try {
-    await sbFetch(`/rest/v1/chat_messages?user_id=eq.${encodeURIComponent(userId)}`, {
-      token, method: 'DELETE'
-    });
+    await sbFetch(`/rest/v1/chat_messages?user_id=eq.${encodeURIComponent(userId)}`, { token, method: 'DELETE' });
   } catch (_) {}
 }
 
@@ -317,7 +254,6 @@ module.exports = async (req, res) => {
       if (sbUser) profile = await readTriesLeft(sbUser.id, token);
     }
 
-    // --- History endpoints ---
     if (action === 'history') {
       if (!sbUser) return res.status(200).json({ history: [] });
       const history = await loadChatHistoryForUser(sbUser.id, token);
@@ -331,7 +267,7 @@ module.exports = async (req, res) => {
     let msgs = Array.isArray(messages) && messages.length ? messages : (message ? [{ role: 'user', content: String(message) }] : []);
     if (!msgs.length && !file) return res.status(400).json({ error: 'لا توجد رسالة' });
 
-    // ---- Watheeq Feature Framing (New Smart Actions) ----
+    // ---- Watheeq Feature Framing ----
     (function applyWatheeqFeatureFraming(){
       const f = String(feature || '').toLowerCase();
       const t = String(tone || '').toLowerCase();
@@ -345,7 +281,6 @@ module.exports = async (req, res) => {
       const original = String(msgs[lastUserIdx].content || '');
       const isAr = /[\u0600-\u06FF]/.test(original);
       let framing = '';
-
       if (f === 'proposal') {
         framing = isAr
           ? '[SYSTEM]\nأنشئ عرض سعر احترافي مهيكل بالضبط كما يلي، بلا هاشتاغات ولا رموز:\n- عنوان العرض في سطر مستقل.\n- قسم "نظرة عامة" 2-3 أسطر.\n- قسم "نطاق العمل" كقائمة نقاط "- ".\n- قسم "بنود التسعير" كجدول Markdown | البند | الوصف | التكلفة (ريال سعودي) | مع صف "الإجمالي" في النهاية.\n- قسم "الجدول الزمني للمخرجات" كجدول Markdown | المرحلة | المدة | المخرجات |.\n- سطر "شروط الدفع".\n- ختام مهني قصير.\nالعملة: ريال سعودي فقط.\n[/SYSTEM]\n\n'
@@ -368,27 +303,16 @@ module.exports = async (req, res) => {
 
     const isFreePlan = !profile || !profile.plan || /مجانية|free/i.test(profile.plan);
     if (profile && isFreePlan && profile.triesLeft <= 0) {
-      return res.status(200).json({
-        trial_ended: true,
-        reply: 'انتهت محاولاتك المجانية. يرجى الترقية للاستمرار.',
-        tries_left: 0
-      });
+      return res.status(200).json({ trial_ended: true, reply: 'انتهت محاولاتك المجانية. يرجى الترقية للاستمرار.', tries_left: 0 });
     }
 
-    // ---------- Token wallet check ----------
     const tokenCost = computeTokenCost({ action, feature, file, messages: msgs });
     let tokenBalance = null;
     if (sbUser && token) {
       const walletInfo = await readTokenBalance(sbUser.id, token);
       tokenBalance = walletInfo ? walletInfo.balance : null;
       if (tokenBalance !== null && tokenBalance < tokenCost) {
-        return res.status(200).json({
-          error: 'رصيد التوكنات غير كافٍ',
-          reply: `رصيد التوكنات غير كافٍ. تحتاج ${tokenCost} توكن لهذه العملية ورصيدك الحالي ${tokenBalance}.`,
-          tokens_left: tokenBalance,
-          tokens_required: tokenCost,
-          insufficient_tokens: true
-        });
+        return res.status(200).json({ error: 'رصيد التوكنات غير كافٍ', reply: `رصيد التوكنات غير كافٍ. تحتاج ${tokenCost} توكن لهذه العملية ورصيدك الحالي ${tokenBalance}.`, tokens_left: tokenBalance, tokens_required: tokenCost, insufficient_tokens: true });
       }
     }
 
@@ -431,11 +355,7 @@ module.exports = async (req, res) => {
       catch (e) { lastError = e; console.error('[chat] Groq pool failed:', e.message); }
     }
     if (!reply) {
-      return res.status(200).json({
-        error: 'الخدمة مشغولة حالياً. حاول بعد لحظات.',
-        detail: String(lastError?.message || 'unknown'),
-        keys: { gemini: GEMINI_KEYS.length, groq: GROQ_KEYS.length }
-      });
+      return res.status(200).json({ error: 'الخدمة مشغولة حالياً. حاول بعد لحظات.', detail: String(lastError?.message || 'unknown'), keys: { gemini: GEMINI_KEYS.length, groq: GROQ_KEYS.length } });
     }
 
     reply = sanitizeReply(reply);
@@ -460,13 +380,7 @@ module.exports = async (req, res) => {
       } catch (_) {}
     }
 
-    return res.status(200).json({
-      reply,
-      tries_left: triesLeft,
-      tokens_left: tokensLeft,
-      tokens_cost: tokenCost,
-      user_id: sbUser ? sbUser.id : null
-    });
+    return res.status(200).json({ reply, tries_left: triesLeft, tokens_left: tokensLeft, tokens_cost: tokenCost, user_id: sbUser ? sbUser.id : null });
   } catch (err) {
     console.error('[api/chat] unexpected error:', err);
     return res.status(200).json({ error: 'خطأ غير متوقع: ' + String(err.message) });
