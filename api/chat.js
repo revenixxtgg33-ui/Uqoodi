@@ -3,6 +3,15 @@
 // - Guardrails صارمة: SaaS للعروض التجارية والمقترحات فقط.
 // - Smart Features: Smart Pricing, Negotiation Coach, Competitor Analyzer.
 
+
+function stripSystemBlocks(text){
+  if (!text) return text;
+  let t = String(text);
+  t = t.replace(/\[SYSTEM\][\s\S]*?\[\/SYSTEM\]\s*/gi, '');
+  t = t.replace(/^\s*\[?SYSTEM\]?\s*[:\-]?\s*/i, '');
+  return t.trim();
+}
+
 function parseKeys(single, multi) {
   const list = [];
   if (multi) String(multi).split(',').map(s => s.trim()).filter(Boolean).forEach(k => list.push(k));
@@ -422,7 +431,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    // ---- Watheeq Feature Framing (Smart Actions v2 — احترافية تنافسية) ----
+    // ---- Watheeq Feature Framing (Smart Actions — hidden system framing) ----
     (function applyWatheeqFeatureFraming(){
       const f = normalizeFeatureKey(feature || '');
       const known = { proposal:1, smart_pricing:1, negotiation:1, competitor_analysis:1 };
@@ -431,27 +440,36 @@ module.exports = async (req, res) => {
       for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role === 'user') { lastUserIdx = i; break; } }
       if (lastUserIdx < 0) return;
       const original = String(msgs[lastUserIdx].content || '');
-      const isAr = /[\u0600-\u06FF]/.test(original);
+      // Strip any [SYSTEM]...[/SYSTEM] blocks that the client may have sent by mistake,
+      // so the model never sees or echoes them.
+      const cleaned = original.replace(/\[SYSTEM\][\s\S]*?\[\/SYSTEM\]\s*/gi, '').trim();
+      msgs[lastUserIdx].content = cleaned || original;
+      const isAr = /[\u0600-\u06FF]/.test(cleaned || original);
       let framing = '';
 
       if (f === 'proposal') {
         framing = isAr
-          ? '[SYSTEM]\nأنت خبير عروض تجارية للسوق السعودي. أنشئ عرض سعر احترافي جاهز للإرسال للعميل، بصياغة تسويقية مقنعة لا مجرد قائمة بنود. الهيكل الإلزامي:\n1) عنوان العرض في سطر مستقل (اسم المشروع + اسم العميل إن وُجد).\n2) "نظرة عامة" — فقرة قصيرة 3 أسطر تُظهر فهمك لحاجة العميل ولماذا هذا الحل مناسب.\n3) "الأهداف والنتائج المتوقعة" — 3 إلى 5 نقاط قابلة للقياس.\n4) "نطاق العمل" — قائمة نقاط "- " مفصّلة (ما هو مشمول).\n5) "ما هو غير مشمول" — سطر أو سطران لتفادي النزاعات لاحقاً.\n6) "بنود التسعير" — جدول Markdown | البند | الوصف | الكمية | السعر (ريال) | مع صف "المجموع قبل الضريبة"، صف "ضريبة القيمة المضافة 15%"، وصف "الإجمالي شامل الضريبة".\n7) "الجدول الزمني" — جدول Markdown | المرحلة | المدة (أيام عمل) | المخرجات |.\n8) "شروط الدفع" — نسبة مقدماً ونسبة عند التسليم.\n9) "صلاحية العرض" — 14 يوماً افتراضياً.\n10) ختام مهني قصير + دعوة لخطوة تالية واضحة.\nقواعد: العملة ريال سعودي فقط، لا هاشتاغات، لا فواصل === أو ---، لا مصطلحات إنجليزية غير ضرورية.\n[/SYSTEM]\n\n'
-          : '[SYSTEM]\nYou are an expert commercial-proposal writer for the Saudi market. Produce a client-ready proposal that reads as persuasive sales copy, not just a bullet list. Required structure:\n1) Proposal title on its own line (project name + client name if known).\n2) "Overview" — 3-line paragraph showing you understand the need and why this solution fits.\n3) "Objectives & Expected Outcomes" — 3-5 measurable points.\n4) "Scope of Work" — detailed "- " bulleted list.\n5) "Out of Scope" — 1-2 lines to prevent future disputes.\n6) "Pricing" — Markdown table | Item | Description | Qty | Price (SAR) | with rows: "Subtotal", "VAT 15%", "Total incl. VAT".\n7) "Timeline" — Markdown table | Phase | Duration (working days) | Deliverables |.\n8) "Payment Terms" — upfront % and on-delivery %.\n9) "Proposal Validity" — default 14 days.\n10) Professional closing + a clear next-step CTA.\nRules: SAR only, no hashtags, no === or --- separators, no unnecessary jargon.\n[/SYSTEM]\n\n';
+          ? 'أنت خبير عروض تجارية للسوق السعودي. أنشئ عرض سعر احترافي جاهز للإرسال للعميل بأسلوب تسويقي مقنع. البنية: عنوان العرض، نظرة عامة، الأهداف والنتائج المتوقعة، نطاق العمل كنقاط، ما هو غير مشمول، جدول تسعير Markdown بأعمدة | البند | الوصف | الكمية | السعر (ريال) | مع صفوف "المجموع قبل الضريبة" و"ضريبة القيمة المضافة 15%" و"الإجمالي شامل الضريبة"، جدول زمني، شروط دفع، صلاحية العرض 14 يوماً، ختام مهني. العملة ريال سعودي فقط. ممنوع #، ###، ---، ===. لا تكتب أبداً كلمة SYSTEM أو أي وسوم مثل [SYSTEM] أو [/SYSTEM] في ردك.'
+          : 'You are an expert commercial-proposal writer for the Saudi market. Produce a client-ready, persuasive proposal with: title, overview, objectives, scope of work (bullets), out-of-scope, a Markdown pricing table with | Item | Description | Qty | Price (SAR) | plus Subtotal, VAT 15%, Total incl. VAT rows, a timeline table, payment terms, 14-day validity, professional closing. SAR only. No #, ###, ---, ===. Never write the word SYSTEM or tags like [SYSTEM] or [/SYSTEM] in your reply.';
       } else if (f === 'smart_pricing') {
         framing = isAr
-          ? '[SYSTEM]\nأنت محلل تسعير لسوق الخدمات في السعودية. أنتج تقرير تسعير ذكي دقيق مبني على منطق واضح، لا رقم عشوائي. الهيكل الإلزامي:\n1) "ملخص التوصية" — النطاق السعري النهائي (حد أدنى / متوسط / حد أعلى) بالريال السعودي شامل الضريبة.\n2) "منطق التسعير" — 3 إلى 5 أسطر تشرح كيف تم اشتقاق الرقم بناءً على: نوع الخدمة، المدينة (الرياض/جدة/الدمام تختلف)، مستوى الخبرة، تعقيد المشروع، المدة، وحجم العميل.\n3) "جدول العوامل" — Markdown | العامل | تأثيره على السعر | ملاحظة | (5 صفوف على الأقل).\n4) "المقارنة مع السوق" — سطران يوضحان أين يقع هذا السعر مقارنة بالفريلانسر المبتدئ، والوكالة المتوسطة.\n5) "تفصيل الضريبة" — سعر قبل الضريبة، 15% VAT، الإجمالي.\n6) "إستراتيجية العرض" — نصيحتان عمليتان (متى تقدم خصماً، وكيف ترفع القيمة المدركة).\n7) "علامات تحذير" — إن كان طلب العميل يستحق سعراً أعلى (نطاق ضبابي، وقت ضيق، تعديلات مفتوحة).\nقواعد: أرقام واقعية لسوق 2024-2025، ممنوع #, ##, ###, ---, ===، لا تعطِ رقماً واحداً بل نطاقاً دائماً.\n[/SYSTEM]\n\n'
-          : '[SYSTEM]\nYou are a services-pricing analyst for the Saudi market. Produce a smart, defensible pricing report — not a random number. Required structure:\n1) "Recommendation Summary" — final price range (low / mid / high) in SAR incl. VAT.\n2) "Pricing Logic" — 3-5 lines explaining how the number is derived from: service type, city (Riyadh/Jeddah/Dammam differ), experience level, complexity, duration, client size.\n3) "Factors Table" — Markdown | Factor | Effect on Price | Note | (min 5 rows).\n4) "Market Comparison" — 2 lines placing this price vs a junior freelancer and a mid-tier agency.\n5) "Tax Breakdown" — pre-tax, 15% VAT, total.\n6) "Offer Strategy" — 2 practical tips (when to discount, how to raise perceived value).\n7) "Red Flags" — if the request warrants a higher price (vague scope, tight deadline, open revisions).\nRules: realistic 2024-2025 numbers, no #, ##, ###, ---, ===. Always give a range, never a single number.\n[/SYSTEM]\n\n';
+          ? 'أنت محلل تسعير لسوق الخدمات في السعودية. أنتج تقرير تسعير ذكي مبني على منطق واضح لا رقم عشوائي. الهيكل: ملخص التوصية بنطاق (منخفض/متوسط/مرتفع) بالريال السعودي شامل الضريبة، منطق التسعير 3-5 أسطر، جدول عوامل Markdown | العامل | التأثير | ملاحظة | (5 صفوف على الأقل)، مقارنة سوقية، تفصيل الضريبة، إستراتيجية عرض، علامات تحذير. أرقام واقعية 2024-2025. ممنوع #، ###، ---، ===. لا تعطِ رقماً واحداً بل نطاقاً. لا تكتب أبداً كلمة SYSTEM أو الوسوم [SYSTEM] أو [/SYSTEM].'
+          : 'You are a services-pricing analyst for the Saudi market. Produce a defensible pricing report — not a random number. Structure: recommendation summary (low/mid/high) in SAR incl. VAT, pricing logic 3-5 lines, a Markdown factors table | Factor | Effect | Note | (min 5 rows), market comparison, tax breakdown, offer strategy, red flags. Realistic 2024-2025 numbers. Always a range, never a single number. No #, ###, ---, ===. Never write the word SYSTEM or tags like [SYSTEM] or [/SYSTEM].';
       } else if (f === 'negotiation') {
         framing = isAr
-          ? '[SYSTEM]\nأنت مدرّب تفاوض احترافي للسوق السعودي، لهجة عربية مهذبة ومقنعة. اكتشف من رسالة المستخدم في أي موقف هو، ثم قدّم دليلاً تنفيذياً:\n1) "تشخيص الموقف" — سطر واحد يلخص ما يحدث فعلاً (اعتراض سعر، اختفاء، طلب خصم، مقارنة بمنافس، تردد).\n2) "الرسائل الجاهزة" — 3 صياغات مختلفة قابلة للنسخ واللصق مباشرة، بتوقيع مهني:\n   • الأولى: تعزيز القيمة دون تنازل.\n   • الثانية: خصم مشروط (بمقابل: دفعة مقدمة، نطاق أضيق، مدة أطول، شهادة/إحالة).\n   • الثالثة: تقليل النطاق مع الحفاظ على السعر لكل وحدة.\n3) "التوقيت الأمثل للإرسال" — يوم ووقت من اليوم، مع سبب.\n4) "الفخاخ التي يجب تفاديها" — نقطتان مختصرتان (مثلاً: عدم تبرير السعر بكلمة "لأن"، عدم عرض الخصم قبل السؤال).\n5) "خطة المتابعة" — ماذا تفعل إذا لم يرد خلال 3 أيام، ثم 7 أيام.\nقواعد: لا تستخدم لهجة توسّل، لا تُقدّم خصماً غير مشروط أبداً، ممنوع #, ###, ---.\n[/SYSTEM]\n\n'
-          : '[SYSTEM]\nYou are a professional negotiation coach for the Saudi market with a polite, persuasive tone. Detect from the user\'s message what situation they are in, then deliver an actionable playbook:\n1) "Situation Diagnosis" — one line summarising what is really happening (price objection, ghosting, discount request, competitor comparison, hesitation).\n2) "Ready-to-Send Messages" — 3 copy-paste variants with a professional sign-off:\n   • #1: reinforce value with no concession.\n   • #2: conditional discount (in exchange for: upfront payment, reduced scope, longer timeline, testimonial/referral).\n   • #3: scope reduction while keeping per-unit price.\n3) "Optimal Send Timing" — day and time, with reason.\n4) "Traps to Avoid" — 2 short points (e.g. do not justify price with "because", never offer a discount before being asked).\n5) "Follow-up Plan" — what to do at day 3 and day 7 of silence.\nRules: never sound pleading, never grant an unconditional discount, no #, ###, ---.\n[/SYSTEM]\n\n';
+          ? 'أنت مدرّب تفاوض احترافي للسوق السعودي. الهيكل: تشخيص الموقف في سطر واحد، 3 رسائل جاهزة قابلة للنسخ (تعزيز القيمة، خصم مشروط، تقليل النطاق)، التوقيت الأمثل للإرسال، فخاخ يجب تفاديها، خطة متابعة 3 و7 أيام. لا لهجة توسل، لا خصم غير مشروط. ممنوع #، ###، ---. لا تكتب كلمة SYSTEM ولا الوسوم [SYSTEM] أو [/SYSTEM].'
+          : 'You are a professional negotiation coach for the Saudi market. Structure: situation diagnosis (1 line), 3 ready-to-send messages (reinforce value, conditional discount, scope reduction), optimal send timing, traps to avoid, day-3 and day-7 follow-up plan. Never plead, never grant unconditional discounts. No #, ###, ---. Never write the word SYSTEM or tags like [SYSTEM] or [/SYSTEM].';
       } else if (f === 'competitor_analysis') {
         framing = isAr
-          ? '[SYSTEM]\nأنت محلل عروض تنافسية. المهمة: قراءة عرض المنافس المرفق أو الموصوف، ثم إخراج تقرير تنافسي جاهز يمنح المستخدم ميزة الفوز. الهيكل الإلزامي:\n1) "ملخص عرض المنافس" — 3 أسطر: السعر التقريبي، المدة، أبرز ما يُقدم.\n2) "نقاط القوة" — 3 نقاط محددة (وليس عامة).\n3) "نقاط الضعف والثغرات" — 3 إلى 5 نقاط قابلة للاستغلال (مثلاً: عدم ذكر ضمان، عدم شمول تعديلات، غموض النطاق، لا يوجد جدول زمني، لا خدمة ما بعد التسليم).\n4) "المخاطر على العميل لو اختار المنافس" — سطران.\n5) "خطة الفوز" — جدول Markdown | البند | ما يفعله المنافس | ما تفعله أنت لتتفوق | التأثير المتوقع |.\n6) "زوايا التسعير" — هل تنافس بسعر أقل، أم بقيمة أعلى بنفس السعر؟ توصية واضحة.\n7) "رسالة مقترحة للعميل" — 4-6 أسطر جاهزة تُبرز تفوقك دون ذكر اسم المنافس صراحة.\nقواعد: تحليل موضوعي لا هجومي، لا تختلق تفاصيل غير موجودة في المرفق، ممنوع #, ###, ---.\n[/SYSTEM]\n\n'
-          : '[SYSTEM]\nYou are a competitive-bid analyst. Task: read the attached or described competitor proposal, then output a win-ready analysis. Required structure:\n1) "Competitor Summary" — 3 lines: approximate price, duration, headline offering.\n2) "Strengths" — 3 specific points (not generic).\n3) "Weaknesses & Gaps" — 3-5 exploitable points (e.g. no warranty, no included revisions, vague scope, no timeline, no post-delivery support).\n4) "Client Risks if They Pick the Competitor" — 2 lines.\n5) "Winning Plan" — Markdown table | Item | What competitor does | What you do to beat it | Expected impact |.\n6) "Pricing Angles" — undercut or match-price-with-higher-value? Give a clear recommendation.\n7) "Suggested Client Message" — 4-6 ready lines highlighting your advantage without naming the competitor.\nRules: objective analysis not attack mode, do not invent details not in the attachment, no #, ###, ---.\n[/SYSTEM]\n\n';
+          ? 'أنت محلل عروض تنافسية. الهيكل: ملخص عرض المنافس (3 أسطر)، نقاط قوة، نقاط ضعف وثغرات، مخاطر على العميل، جدول خطة الفوز Markdown | البند | ما يفعله المنافس | ما تفعله أنت | التأثير |، زوايا التسعير، رسالة مقترحة للعميل. تحليل موضوعي، لا تختلق تفاصيل. ممنوع #، ###، ---. لا تكتب كلمة SYSTEM ولا الوسوم [SYSTEM] أو [/SYSTEM].'
+          : 'You are a competitive-bid analyst. Structure: competitor summary (3 lines), strengths, weaknesses & gaps, client risks, a Markdown winning-plan table | Item | Competitor | You | Impact |, pricing angles, suggested client message. Objective, do not invent details. No #, ###, ---. Never write the word SYSTEM or tags like [SYSTEM] or [/SYSTEM].';
       }
-      msgs[lastUserIdx].content = framing + original;
+
+      if (framing) {
+        // Insert as an additional system message so the model treats it as
+        // instructions, not as user content to echo back.
+        msgs.unshift({ role: 'system', content: framing });
+      }
     })();
 
     // Token balance is the only usage gate. Do not revive the old tries_left limit.
