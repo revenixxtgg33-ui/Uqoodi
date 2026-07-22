@@ -429,6 +429,15 @@ module.exports = async (req, res) => {
     }
     if (!msgs.length && !file) return res.status(400).json({ error: 'لا توجد رسالة' });
 
+    // Snapshot the ORIGINAL user text (before framing/file appends)
+    // so we save exactly what the user typed, not the internal prompt.
+    const __originalUserText = (() => {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === 'user') return String(msgs[i].content || '');
+      }
+      return '';
+    })();
+
     if (!sbUser || !token) {
       return res.status(401).json({
         error: 'يرجى تسجيل الدخول أولاً',
@@ -572,8 +581,8 @@ module.exports = async (req, res) => {
 
     if (sbUser && token) {
       try {
-        const lastUser = [...msgs].reverse().find(m => m.role === 'user');
-        if (lastUser && lastUser.content) await saveChatMessage(sbUser.id, token, 'user', lastUser.content);
+        // Save the ORIGINAL user text (never the file-extraction append or framing)
+        if (__originalUserText) await saveChatMessage(sbUser.id, token, 'user', __originalUserText);
         if (reply) await saveChatMessage(sbUser.id, token, 'assistant', reply);
       } catch (_) {}
     }
