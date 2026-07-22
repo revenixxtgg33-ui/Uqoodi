@@ -269,10 +269,38 @@ function computeTokenCost({ action, feature, file, messages }) {
   return TOKEN_COST_CHAT;
 }
 
+function parseRpcNumber(data) {
+  if (typeof data === 'number') return data;
+  if (typeof data === 'string' && data.trim() !== '') return Number(data);
+  if (Array.isArray(data) && data.length) {
+    const row = data[0];
+    if (typeof row === 'number') return row;
+    if (row && typeof row === 'object') {
+      if ('ensure_user_tokens' in row) return Number(row.ensure_user_tokens);
+      if ('balance' in row) return Number(row.balance);
+    }
+  }
+  if (data && typeof data === 'object' && 'balance' in data) return Number(data.balance);
+  return null;
+}
+
+function parseSpendResult(data) {
+  let value = data;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch (_) {}
+  }
+  if (!value || typeof value !== 'object') return null;
+  return {
+    success: value.success === true,
+    balance: Number(value.balance) || 0,
+    error: value.error ? String(value.error) : null
+  };
+}
+
 async function readTokenBalance(userId, token) {
   if (!userId) return null;
   const { ok, data } = await sbFetch(
-    `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}&select=balance,last_updated`,
+    `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}&select=balance`,
     { token }
   );
   if (!ok || !Array.isArray(data)) return null;
@@ -282,12 +310,20 @@ async function readTokenBalance(userId, token) {
 
 async function createTokenWallet(userId, token) {
   if (!userId || !token) return { balance: 0, exists: false };
-  const { ok } = await sbFetch('/rest/v1/user_tokens', {
+
+  // Uses a SECURITY DEFINER RPC that creates the one-time 50-token wallet
+  // only when the authenticated user has no wallet yet. It never refills
+  // an existing wallet whose balance has reached 0.
+  const { ok, data } = await sbFetch('/rest/v1/rpc/ensure_user_tokens', {
     token,
     method: 'POST',
-    body: { user_id: userId, balance: FREE_TOKENS_ON_SIGNUP }
+    body: {}
   });
-  if (ok) return { balance: FREE_TOKENS_ON_SIGNUP, exists: true, created: true };
+  if (ok) {
+    const balance = parseRpcNumber(data);
+    if (Number.isFinite(balance)) return { balance, exists: true, created: true };
+  }
+
   const reread = await readTokenBalance(userId, token);
   return reread && reread.exists ? reread : { balance: 0, exists: false };
 }
@@ -298,9 +334,20 @@ async function ensureTokenWallet(userId, token) {
   return createTokenWallet(userId, token);
 }
 
+async function spendTokenBalance(token, amount) {
+  if (!token || !amount) return null;
+  const { ok, data } = await sbFetch('/rest/v1/rpc/spend_user_tokens', {
+    token,
+    method: 'POST',
+    body: { _amount: amount }
+  });
+  if (!ok) return null;
+  return parseSpendResult(data);
+}
+
 async function updateTokenBalance(userId, token, newBalance) {
-  const body = { balance: newBalance, last_updated: new Date().toISOString() };
-  const { ok, data } = await sbFetch(
+  const body = { balance: newBalance, updated_at: new Date().toISOString() };
+  const { ok } = await sbFetch(
     `/rest/v1/user_tokens?user_id=eq.${encodeURIComponent(userId)}`,
     { token, method: 'PATCH', body }
   );
@@ -478,9 +525,25 @@ module.exports = async (req, res) => {
 
     let tokensLeft = tokenBalance;
     if (sbUser && token && tokenBalance !== null) {
-      const newBalance = Math.max(0, tokenBalance - tokenCost);
-      const updated = await updateTokenBalance(sbUser.id, token, newBalance);
-      tokensLeft = updated !== null ? updated : tokenBalance;
+      const spent = await spendTokenBalance(token, tokenCost);
+      if (!spent) {
+        console.error('[chat] spend_user_tokens RPC failed. Run fix-user-tokens.sql in Supabase.');
+        return res.status(200).json({
+          error: 'تعذر تحديث رصيد التوكنات',
+          reply: 'تعذر تحديث رصيد التوكنات. الرجاء تحديث إعدادات قاعدة البيانات ثم المحاولة مرة أخرى.',
+          tokens_left: tokenBalance
+        });
+      }
+      if (!spent.success) {
+        return res.status(200).json({
+          error: 'رصيد التوكنات غير كافٍ',
+          reply: `رصيد التوكنات غير كافٍ. تحتاج ${tokenCost} توكن لهذه العملية ورصيدك الحالي ${spent.balance}.`,
+          tokens_left: spent.balance,
+          tokens_required: tokenCost,
+          insufficient_tokens: true
+        });
+      }
+      tokensLeft = spent.balance;
     }
 
     if (sbUser && token) {
