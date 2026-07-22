@@ -245,13 +245,21 @@ async function decrementTries(userId, currentTries, token) {
 // ---------- Token wallet ----------
 const TOKEN_COST_CHAT  = 5;
 const TOKEN_COST_SMART = 25;
+const FREE_TOKENS_ON_SIGNUP = 50;
 
 const SMART_ACTIONS = new Set([
-  'smart_pricing', 'negotiation', 'competitor_analysis', 'proposal'
+  'smart_pricing', 'pricing', 'negotiation', 'competitor_analysis', 'competitor', 'proposal', 'rewrite'
 ]);
 
+function normalizeFeatureKey(value) {
+  const key = String(value || '').toLowerCase().trim();
+  if (key === 'pricing') return 'smart_pricing';
+  if (key === 'competitor') return 'competitor_analysis';
+  return key;
+}
+
 function computeTokenCost({ action, feature, file, messages }) {
-  const key = String(feature || action || '').toLowerCase();
+  const key = normalizeFeatureKey(feature || action || '');
   if (SMART_ACTIONS.has(key)) return TOKEN_COST_SMART;
   if (file && (file.type === 'application/pdf' || file.base64 || file.text)) return TOKEN_COST_SMART;
   const lastUser = Array.isArray(messages) ? [...messages].reverse().find(m => m.role === 'user') : null;
@@ -271,6 +279,25 @@ async function readTokenBalance(userId, token) {
   if (!data.length) return { balance: 0, exists: false };
   return { balance: Number(data[0].balance) || 0, exists: true };
 }
+
+async function createTokenWallet(userId, token) {
+  if (!userId || !token) return { balance: 0, exists: false };
+  const { ok } = await sbFetch('/rest/v1/user_tokens', {
+    token,
+    method: 'POST',
+    body: { user_id: userId, balance: FREE_TOKENS_ON_SIGNUP }
+  });
+  if (ok) return { balance: FREE_TOKENS_ON_SIGNUP, exists: true, created: true };
+  const reread = await readTokenBalance(userId, token);
+  return reread && reread.exists ? reread : { balance: 0, exists: false };
+}
+
+async function ensureTokenWallet(userId, token) {
+  const wallet = await readTokenBalance(userId, token);
+  if (wallet && wallet.exists) return wallet;
+  return createTokenWallet(userId, token);
+}
+
 async function updateTokenBalance(userId, token, newBalance) {
   const body = { balance: newBalance, last_updated: new Date().toISOString() };
   const { ok, data } = await sbFetch(
@@ -340,9 +367,17 @@ module.exports = async (req, res) => {
     let msgs = Array.isArray(messages) && messages.length ? messages : (message ? [{ role: 'user', content: String(message) }] : []);
     if (!msgs.length && !file) return res.status(400).json({ error: 'لا توجد رسالة' });
 
+    if (!sbUser || !token) {
+      return res.status(401).json({
+        error: 'يرجى تسجيل الدخول أولاً',
+        reply: 'يرجى تسجيل الدخول أولاً لاستخدام وثيق.',
+        tokens_left: 0
+      });
+    }
+
     // ---- Watheeq Feature Framing (Smart Actions v2 — احترافية تنافسية) ----
     (function applyWatheeqFeatureFraming(){
-      const f = String(feature || '').toLowerCase();
+      const f = normalizeFeatureKey(feature || '');
       const known = { proposal:1, smart_pricing:1, negotiation:1, competitor_analysis:1 };
       if (!known[f]) return;
       let lastUserIdx = -1;
@@ -372,20 +407,13 @@ module.exports = async (req, res) => {
       msgs[lastUserIdx].content = framing + original;
     })();
 
-    const isFreePlan = !profile || !profile.plan || /مجانية|free/i.test(profile.plan);
-    if (profile && isFreePlan && profile.triesLeft <= 0) {
-      return res.status(200).json({
-        trial_ended: true,
-        reply: 'انتهت محاولاتك المجانية. يرجى الترقية للاستمرار.',
-        tries_left: 0
-      });
-    }
+    // Token balance is the only usage gate. Do not revive the old tries_left limit.
 
     // ---------- Token wallet check ----------
     const tokenCost = computeTokenCost({ action, feature, file, messages: msgs });
     let tokenBalance = null;
     if (sbUser && token) {
-      const walletInfo = await readTokenBalance(sbUser.id, token);
+      const walletInfo = await ensureTokenWallet(sbUser.id, token);
       tokenBalance = walletInfo ? walletInfo.balance : null;
       if (tokenBalance !== null && tokenBalance < tokenCost) {
         return res.status(200).json({
@@ -447,9 +475,6 @@ module.exports = async (req, res) => {
     reply = sanitizeReply(reply);
 
     let triesLeft = profile?.triesLeft;
-    if (profile && sbUser && isFreePlan) {
-      triesLeft = await decrementTries(sbUser.id, profile.triesLeft, token);
-    }
 
     let tokensLeft = tokenBalance;
     if (sbUser && token && tokenBalance !== null) {
