@@ -421,6 +421,12 @@ module.exports = async (req, res) => {
     }
 
     let msgs = Array.isArray(messages) && messages.length ? messages : (message ? [{ role: 'user', content: String(message) }] : []);
+    // Safety-net: if a Smart feature is requested but the user did not type any
+    // details, seed a generic prompt so the model can respond (and the client
+    // no longer receives the confusing "لا توجد رسالة" error).
+    if (!msgs.length && !file && (feature || action)) {
+      msgs = [{ role: 'user', content: 'اقترح لي مخرجات جاهزة لهذه الميزة بناءً على مشروع افتراضي في السوق السعودي، مع طلب التفاصيل الناقصة في نهاية الرد.' }];
+    }
     if (!msgs.length && !file) return res.status(400).json({ error: 'لا توجد رسالة' });
 
     if (!sbUser || !token) {
